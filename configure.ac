@@ -342,10 +342,12 @@ else
     CXXFLAGS="$CXXFLAGS -fno-strict-aliasing"
   fi
 
-  # Check for GCC version 4.8.
+  # Check for GCC version 4.8 or 4.9.
   AX_COMPARE_VERSION([$GCC_VERSION], [eq2], [4.8],
                      [is_gxx48=yes], [is_gxx48=no])
-  if test "x$is_gxx48" = "xyes"; then
+  AX_COMPARE_VERSION([$GCC_VERSION], [eq2], [4.9],
+                     [is_gxx49=yes], [is_gxx49=no])
+  if test "x$is_gxx48" = "xyes" || test "x$is_gxx49" = "xyes"; then
     AC_MSG_NOTICE([Setting up CXXFLAGS for g++-4.8])
     # Boost 1.53.0 fails to compile with GCC 4.8 without
     # -Wno-unused-local-typedefs, and automake does not recognize the
