@@ -1228,7 +1228,15 @@ inline Try<Release> release()
           &r.version,
           &r.major,
           &r.minor) != 3) {
-    return Error("Failed to parse: " + info.get().release);
+    // Fall back on no minor release.
+    if (::sscanf(
+            info.get().release.c_str(),
+            "%d.%d",
+            &r.version,
+            &r.major) != 2) {
+        return Error("Failed to parse: " + info.get().release);
+    }
+    r.minor = 0;
   }
 
   return r;
