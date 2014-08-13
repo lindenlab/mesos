@@ -2,8 +2,8 @@
 Description=The Mesos master distributes computing tasks to slaves
 Documentation=http://mesos.apache.org/documentation/latest/
 After=network.target
-PIDFile=/var/run/mesos-master.pid
 
 [Service]
 ExecStart=/usr/bin/mesos-init-wrapper master
+PIDFile=/var/run/mesos-master.pid
 
