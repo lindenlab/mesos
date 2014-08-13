@@ -2,8 +2,8 @@
 Description=The Mesos slave performs computing tasks
 Documentation=http://mesos.apache.org/documentation/latest/
 After=network.target
-PIDFile=/var/run/mesos-slave.pid
 
 [Service]
 ExecStart=/usr/bin/mesos-init-wrapper slave
+PIDFile=/var/run/mesos-slave.pid
 
