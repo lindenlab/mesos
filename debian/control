@@ -1,0 +1,38 @@
+Source: mesos
+Section: misc
+Priority: extra
+Maintainer: mesos-dev@incubator.apache.org
+Homepage: http://incubator.apache.org/mesos/
+Build-Depends: debhelper (>= 5), build-essential, openjdk-7-jdk | openjdk-6-jdk, python-dev, python-boto, libcurl4-nss-dev, libsasl2-dev, maven, autoconf, libtool, dh-systemd (>= 1.5)
+Standards-Version: 3.7.2
+
+Package: mesos
+Architecture: amd64
+Depends: java7-runtime-headless | java6-runtime-headless, libcurl3, libcurl3-nss
+Recommends: zookeeper, zookeeperd, zookeeper-bin
+Description: Cluster resouce manager with efficient resource isolation
+ Apache Mesos is a cluster manager that offers efficient resource isolation
+ and sharing across distributed applications, or frameworks. It can run
+ Hadoop, MPI, Hypertable, Spark (a new framework for low-latency interactive
+ and iterative jobs), and other applications.
+
+
+Package: mesos-master
+Architecture: amd64
+Depends: mesos
+Description: Cluster resouce manager with efficient resource isolation (master)
+ Apache Mesos is a cluster manager that offers efficient resource isolation
+ and sharing across distributed applications, or frameworks. It can run
+ Hadoop, MPI, Hypertable, Spark (a new framework for low-latency interactive
+ and iterative jobs), and other applications.
+
+Package: mesos-slave
+Architecture: amd64
+Depends: mesos
+Description: Cluster resouce manager with efficient resource isolation (slave)
+ Apache Mesos is a cluster manager that offers efficient resource isolation
+ and sharing across distributed applications, or frameworks. It can run
+ Hadoop, MPI, Hypertable, Spark (a new framework for low-latency interactive
+ and iterative jobs), and other applications.
+
+

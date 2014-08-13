@@ -1,0 +1,5 @@
+mesos (0.20.0) unstable; urgency=medium
+
+  * Initial debian packaging.
+
+ -- Don Kjer <don@lindenlab.com>  Mon, 11 Aug 2014 21:26:54 +0000

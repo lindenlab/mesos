@@ -1,0 +1,126 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+# Sample debian/rules that uses debhelper.
+# This file was originally written by Joey Hess and Craig Small.
+# As a special exception, when this file is copied by dh-make into a
+# dh-make output file, you may use that output file without restriction.
+# This special exception was added by Craig Small in version 0.37 of dh-make.
+
+# Uncomment this to turn on verbose mode.
+#export DH_VERBOSE=1
+
+
+export JAVA_HOME:=$(shell update-alternatives --query javac | grep ^Value | sed -e 's/^Value: //' -e 's_/bin/javac__')
+CC:=
+CXX:=
+
+export DESTDIR:=$(CURDIR)/debian/mesos
+
+
+CFLAGS = -Wall -g
+
+ifneq (,$(findstring noopt,$(DEB_BUILD_OPTIONS)))
+	CFLAGS += -O0
+else
+	CFLAGS += -O2
+endif
+
+configure: configure-stamp
+configure-stamp:
+	dh_testdir
+	# Add here commands to configure the package.
+	./bootstrap
+	mkdir -p build
+	cd build; ../configure --prefix=/usr
+
+	touch configure-stamp
+
+
+build: build-stamp
+build-stamp: configure-stamp 
+	dh_testdir
+
+	# Add here commands to compile the package.
+	cd build; $(MAKE)
+	#docbook-to-man debian/mesos.sgml > mesos.1
+
+	touch $@
+
+clean:
+	dh_testdir
+	dh_testroot
+	rm -f build-stamp configure-stamp
+	rm -rf build
+
+	# Add here commands to clean up after the build process.
+	-cd build; $(MAKE) clean
+
+	dh_clean 
+
+install: build
+	dh_testdir
+	dh_testroot
+	dh_clean -k 
+	dh_installdirs
+
+	cd build; $(MAKE) install
+	install -v -m 755 -o root -g root -d $(DESTDIR)/usr
+	install -v -m 755 -o root -g root -d $(DESTDIR)/usr/bin
+	install -v -m 755 -o root -g root bin/mesos-init-wrapper $(DESTDIR)/usr/bin/mesos-init-wrapper
+
+	install -v -m 755 -o root -g root -d $(DESTDIR)/etc
+	install -v -m 755 -o root -g root -d $(DESTDIR)/etc/mesos
+	install -v -m 755 -o root -g root -d $(DESTDIR)/etc/mesos-master
+	install -v -m 755 -o root -g root -d $(DESTDIR)/etc/mesos-slave
+	install -v -m 644 -o root -g root etc/mesos/zk $(DESTDIR)/etc/mesos/zk
+	install -v -m 644 -o root -g root etc/mesos-master/quorum $(DESTDIR)/etc/mesos-master/quorum
+	install -v -m 644 -o root -g root etc/mesos-master/work_dir $(DESTDIR)/etc/mesos-master/work_dir
+
+
+
+# Build architecture-independent files here.
+binary-indep: build install
+# We have nothing to do by default.
+
+# Build architecture-dependent files here.
+binary-arch: build install
+	dh_testdir
+	dh_testroot
+	dh_installchangelogs 
+	dh_installdocs
+	dh_installexamples
+#	dh_install
+#	dh_installmenu
+#	dh_installdebconf	
+#	dh_installlogrotate
+#	dh_installemacsen
+#	dh_installpam
+#	dh_installmime
+#	dh_python
+
+# To add an init script, uncomment this line and edit debian/init.d and 
+# customize debian/mesos.default to suit your needs.
+	dh_systemd_enable
+	dh_installinit --no-start
+	dh_systemd_start
+
+# To add cron jobs, uncomment this line and make a crontab file named 
+# debian/cron.d, and it will be installed in /etc/cron.d/
+#	dh_installcron
+
+#	dh_installinfo
+	dh_installman
+	dh_link
+	dh_strip
+	dh_compress
+#	dh_fixperms
+#	dh_perl
+#	dh_makeshlibs
+	dh_installdeb
+	dh_shlibdeps
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+binary: binary-indep binary-arch
+.PHONY: build clean binary-indep binary-arch binary install configure
