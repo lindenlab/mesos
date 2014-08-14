@@ -56,9 +56,9 @@ bool operator == (const CommandInfo& left, const CommandInfo& right)
     return false;
   }
 
-  for (int i=0; i<left.uris().size(); i++) {
+  for (int i = 0; i < left.uris().size(); i++) {
     bool found = false;
-    for (int j=0; j<right.uris().size(); j++) {
+    for (int j = 0; j < right.uris().size(); j++) {
       if (left.uris().Get(i) == right.uris().Get(j)) {
         found = true;
         break;
@@ -69,9 +69,23 @@ bool operator == (const CommandInfo& left, const CommandInfo& right)
     }
   }
 
+  if (left.arguments().size() != right.arguments().size()) {
+    return false;
+  }
+
+  // The order of argv is important.
+  for (int i = 0; i < left.arguments().size(); i++) {
+    if (left.arguments().Get(i) != right.arguments().Get(i)) {
+      return false;
+    }
+  }
+
   return left.has_environment() == right.has_environment() &&
     (!left.has_environment() || (left.environment() == right.environment())) &&
-    left.value() == right.value();
+    left.has_value() == right.has_value() &&
+    (!left.has_value() || (left.value() == right.value())) &&
+    left.has_shell() == right.has_shell() &&
+    (!left.has_shell() || (left.shell() == right.shell()));
 }
 
 

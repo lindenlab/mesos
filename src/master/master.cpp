@@ -2098,87 +2098,54 @@ void Master::launchTasks(
     return;
   }
 
-  // TODO(bmahler): This case can be caught during offer validation.
-  if (offerIds.empty()) {
-    LOG(WARNING) << "No offers to launch tasks on";
-
-    foreach (const TaskInfo& task, tasks) {
-      const StatusUpdate& update = protobuf::createStatusUpdate(
-          framework->id,
-          task.slave_id(),
-          task.task_id(),
-          TASK_LOST,
-          "Task launched without offers");
-
-      forward(update, UPID(), framework);
-    }
-    return;
-  }
-
-  // Common slave id for task validation.
-  Option<SlaveID> slaveId;
-
-  // Create offer visitors.
-  list<OfferVisitor*> offerVisitors;
-  offerVisitors.push_back(new ValidOfferChecker());
-  offerVisitors.push_back(new FrameworkChecker());
-  offerVisitors.push_back(new SlaveChecker());
-  offerVisitors.push_back(new UniqueOfferIDChecker());
-
-  // Verify and aggregate all offers.
-  // Abort offer and task processing if any offer validation failed.
-  Resources totalResources;
+  // TODO(bmahler): We currently only support using multiple offers
+  // for a single slave.
+  Resources used;
+  Option<SlaveID> slaveId = None();
   Option<Error> error = None();
-  foreach (const OfferID& offerId, offerIds) {
-    foreach (OfferVisitor* visitor, offerVisitors) {
-      error = (*visitor)(offerId, *framework, this);
-      if (error.isSome()) {
-        break;
+
+  if (offerIds.empty()) {
+    error = Error("No offers specified");
+  } else {
+    list<Owned<OfferVisitor> > offerVisitors;
+    offerVisitors.push_back(Owned<OfferVisitor>(new ValidOfferChecker()));
+    offerVisitors.push_back(Owned<OfferVisitor>(new FrameworkChecker()));
+    offerVisitors.push_back(Owned<OfferVisitor>(new SlaveChecker()));
+    offerVisitors.push_back(Owned<OfferVisitor>(new UniqueOfferIDChecker()));
+
+    // Validate the offers.
+    foreach (const OfferID& offerId, offerIds) {
+      foreach (const Owned<OfferVisitor>& visitor, offerVisitors) {
+        if (error.isNone()) {
+          error = (*visitor)(offerId, *framework, this);
+        }
       }
     }
-    // Offer validation error needs to be propagated from visitor
-    // loop above.
-    if (error.isSome()) {
-      break;
-    }
 
-    // If offer validation succeeds, we need to pass along the common
-    // slave. So optimistically, we store the first slave id we see.
-    // In case of invalid offers (different slaves for example), we
-    // report error and return from launchTask before slaveId is used.
-    if (slaveId.isNone()) {
-      slaveId = getOffer(offerId)->slave_id();
-    }
+    // Compute used resources and remove the offers. If the
+    // validation failed, return resources to the allocator.
+    foreach (const OfferID& offerId, offerIds) {
+      Offer* offer = getOffer(offerId);
+      if (offer != NULL) {
+        slaveId = offer->slave_id();
+        used += offer->resources();
 
-    totalResources += getOffer(offerId)->resources();
-  }
-
-  // Cleanup visitors.
-  while (!offerVisitors.empty()) {
-    OfferVisitor* visitor = offerVisitors.front();
-    offerVisitors.pop_front();
-    delete visitor;
-  };
-
-  // Remove offers and recover resources if any of the offers are
-  // invalid.
-  foreach (const OfferID& offerId, offerIds) {
-    Offer* offer = getOffer(offerId);
-    if (offer != NULL) {
-      if (error.isSome()) {
-        allocator->resourcesRecovered(
-            offer->framework_id(),
-            offer->slave_id(),
-            offer->resources(),
-            None());
+        if (error.isSome()) {
+          allocator->resourcesRecovered(
+              offer->framework_id(),
+              offer->slave_id(),
+              offer->resources(),
+              None());
+        }
+        removeOffer(offer);
       }
-      removeOffer(offer);
     }
   }
 
+  // If invalid, send TASK_LOST for the launch attempts.
   if (error.isSome()) {
-    LOG(WARNING) << "Failed to validate offer " << stringify(offerIds)
-                   << ": " << error.get().message;
+    LOG(WARNING) << "Launch tasks message used invalid offers '"
+                 << stringify(offerIds) << "': " << error.get().message;
 
     foreach (const TaskInfo& task, tasks) {
       const StatusUpdate& update = protobuf::createStatusUpdate(
@@ -2188,12 +2155,15 @@ void Master::launchTasks(
           TASK_LOST,
           "Task launched with invalid offers: " + error.get().message);
 
+      metrics.tasks_lost++;
+      stats.tasks[TASK_LOST]++;
+
       forward(update, UPID(), framework);
     }
     return;
   }
 
-  CHECK(slaveId.isSome()) << "Slave id not found";
+  CHECK_SOME(slaveId);
   Slave* slave = CHECK_NOTNULL(getSlave(slaveId.get()));
 
   LOG(INFO) << "Processing reply for offers: "
@@ -2204,12 +2174,14 @@ void Master::launchTasks(
   // Validate each task and launch if valid.
   list<Future<Option<Error> > > futures;
   foreach (const TaskInfo& task, tasks) {
-    futures.push_back(validateTask(task, framework, slave, totalResources));
+    futures.push_back(validateTask(task, framework, slave, used));
 
     // Add to pending tasks.
     // NOTE: We need to do this here after validation because of the
     // way task validators work.
     framework->pendingTasks[task.task_id()] = task;
+
+    stats.tasks[TASK_STAGING]++;
   }
 
   // Wait for all the tasks to be validated.
@@ -2221,7 +2193,7 @@ void Master::launchTasks(
                  framework->id,
                  slaveId.get(),
                  tasks,
-                 totalResources,
+                 used,
                  filters,
                  lambda::_1));
 }
@@ -2237,33 +2209,28 @@ Future<Option<Error> > Master::validateTask(
   CHECK_NOTNULL(slave);
 
   // Create task visitors.
-  // TODO(vinod): Create the visitors on the heap and make the visit
+  // TODO(vinod): Create the visitors on the stack and make the visit
   // operation const.
-  list<TaskInfoVisitor*> taskVisitors;
-  taskVisitors.push_back(new TaskIDChecker());
-  taskVisitors.push_back(new SlaveIDChecker());
-  taskVisitors.push_back(new UniqueTaskIDChecker());
-  taskVisitors.push_back(new ResourceUsageChecker());
-  taskVisitors.push_back(new ExecutorInfoChecker());
-  taskVisitors.push_back(new CheckpointChecker());
+  list<Owned<TaskInfoVisitor> > taskVisitors;
+  taskVisitors.push_back(Owned<TaskInfoVisitor>(new TaskIDChecker()));
+  taskVisitors.push_back(Owned<TaskInfoVisitor>(new SlaveIDChecker()));
+  taskVisitors.push_back(Owned<TaskInfoVisitor>(new UniqueTaskIDChecker()));
+  taskVisitors.push_back(Owned<TaskInfoVisitor>(new ResourceUsageChecker()));
+  taskVisitors.push_back(Owned<TaskInfoVisitor>(new ExecutorInfoChecker()));
+  taskVisitors.push_back(Owned<TaskInfoVisitor>(new CheckpointChecker()));
 
   // TODO(benh): Add a HealthCheckChecker visitor.
 
+  // TODO(jieyu): Add a CommandInfoCheck visitor.
+
   // Invoke each visitor.
   Option<Error> error = None();
-  foreach (TaskInfoVisitor* visitor, taskVisitors) {
+  foreach (const Owned<TaskInfoVisitor>& visitor, taskVisitors) {
     error = (*visitor)(task, totalResources, *framework, *slave);
     if (error.isSome()) {
       break;
     }
   }
-
-  // Cleanup visitors.
-  while (!taskVisitors.empty()) {
-    TaskInfoVisitor* visitor = taskVisitors.front();
-    taskVisitors.pop_front();
-    delete visitor;
-  };
 
   if (error.isSome()) {
     return Error(error.get().message);
@@ -2360,8 +2327,6 @@ void Master::launchTask(
   message.mutable_task()->MergeFrom(task);
   send(slave->pid, message);
 
-  stats.tasks[TASK_STAGING]++;
-
   return;
 }
 
@@ -2399,6 +2364,9 @@ void Master::_launchTasks(
           TASK_LOST,
           (slave == NULL ? "Slave removed" : "Slave disconnected"));
 
+      metrics.tasks_lost++;
+      stats.tasks[TASK_LOST]++;
+
       forward(update, UPID(), framework);
     }
 
@@ -2435,6 +2403,9 @@ void Master::_launchTasks(
           TASK_LOST,
           error);
 
+      metrics.tasks_lost++;
+      stats.tasks[TASK_LOST]++;
+
       forward(update, UPID(), framework);
 
       continue;
@@ -2460,6 +2431,9 @@ void Master::_launchTasks(
           task.task_id(),
           TASK_LOST,
           error);
+
+      metrics.tasks_lost++;
+      stats.tasks[TASK_LOST]++;
 
       forward(update, UPID(), framework);
 
@@ -3328,7 +3302,26 @@ void Master::reconcileTasks(
     LOG(INFO) << "Performing implicit task state reconciliation for framework "
               << frameworkId;
 
-    // TODO(bmahler): Consider sending completed tasks?
+    foreachvalue (const TaskInfo& task, framework->pendingTasks) {
+      const StatusUpdate& update = protobuf::createStatusUpdate(
+          frameworkId,
+          task.slave_id(),
+          task.task_id(),
+          TASK_STAGING,
+          "Reconciliation: Latest task state");
+
+      VLOG(1) << "Sending implicit reconciliation state "
+              << update.status().state()
+              << " for task " << update.status().task_id()
+              << " of framework " << frameworkId;
+
+      // TODO(bmahler): Consider using forward(); might lead to too
+      // much logging.
+      StatusUpdateMessage message;
+      message.mutable_update()->CopyFrom(update);
+      send(framework->pid, message);
+    }
+
     foreachvalue (Task* task, framework->tasks) {
       const StatusUpdate& update = protobuf::createStatusUpdate(
           frameworkId,
@@ -3357,7 +3350,7 @@ void Master::reconcileTasks(
             << statuses.size() << " tasks of framework " << frameworkId;
 
   // Explicit reconciliation occurs for the following cases:
-  //   (1) Task is known, but pending: no-op.
+  //   (1) Task is known, but pending: TASK_STAGING.
   //   (2) Task is known: send the latest state.
   //   (3) Task is unknown, slave is registered: TASK_LOST.
   //   (4) Task is unknown, slave is transitioning: no-op.
@@ -3379,10 +3372,14 @@ void Master::reconcileTasks(
     Task* task = framework->getTask(status.task_id());
 
     if (framework->pendingTasks.contains(status.task_id())) {
-      // (1) Task is known, but pending: no-op.
-      LOG(INFO) << "Ignoring reconciliation request of task "
-                << status.task_id() << " from framework " << frameworkId
-                << " because the task is pending";
+      // (1) Task is known, but pending: TASK_STAGING.
+      const TaskInfo& task_ = framework->pendingTasks[status.task_id()];
+      update = protobuf::createStatusUpdate(
+          frameworkId,
+          task_.slave_id(),
+          task_.task_id(),
+          TASK_STAGING,
+          "Reconciliation: Latest task state");
     } else if (task != NULL) {
       // (2) Task is known: send the latest state.
       update = protobuf::createStatusUpdate(
@@ -4508,6 +4505,11 @@ double Master::_slaves_inactive()
 double Master::_tasks_staging()
 {
   double count = 0.0;
+
+  // Add the tasks pending validation / authorization.
+  foreachvalue (Framework* framework, frameworks.registered) {
+    count += framework->pendingTasks.size();
+  }
 
   foreachvalue (Slave* slave, slaves.registered) {
     typedef hashmap<TaskID, Task*> TaskMap;
