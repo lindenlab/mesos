@@ -28,7 +28,7 @@ Description: Cluster resouce manager with efficient resource isolation (master)
 
 Package: mesos-slave
 Architecture: amd64
-Depends: mesos, python-deimos
+Depends: mesos
 Description: Cluster resouce manager with efficient resource isolation (slave)
  Apache Mesos is a cluster manager that offers efficient resource isolation
  and sharing across distributed applications, or frameworks. It can run
