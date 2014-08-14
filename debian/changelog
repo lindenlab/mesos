@@ -1,4 +1,4 @@
-mesos (0.20.0) unstable; urgency=medium
+mesos (0.19.1) unstable; urgency=medium
 
   * Initial debian packaging.
 
