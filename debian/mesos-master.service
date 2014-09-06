@@ -7,3 +7,6 @@ After=network.target
 ExecStart=/usr/bin/mesos-init-wrapper master
 PIDFile=/var/run/mesos-master.pid
 
+[Install]
+WantedBy=multi-user.target
+
