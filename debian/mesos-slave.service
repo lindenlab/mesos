@@ -6,6 +6,7 @@ After=network.target
 [Service]
 ExecStart=/usr/bin/mesos-init-wrapper slave
 PIDFile=/var/run/mesos-slave.pid
+Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
