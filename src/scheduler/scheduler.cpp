@@ -47,6 +47,7 @@
 #include <stout/error.hpp>
 #include <stout/flags.hpp>
 #include <stout/lambda.hpp>
+#include <stout/net.hpp>
 #include <stout/nothing.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
@@ -59,8 +60,6 @@
 #include "master/detector.hpp"
 
 #include "local/local.hpp"
-
-#include "master/detector.hpp"
 
 #include "logging/flags.hpp"
 #include "logging/logging.hpp"
@@ -127,7 +126,21 @@ public:
     // want to use flags to initialize libprocess).
     process::initialize();
 
-    logging::initialize("mesos", flags);
+    if (stringify(net::IP(ntohl(self().ip))) == "127.0.0.1") {
+      LOG(WARNING) << "\n**************************************************\n"
+                   << "Scheduler driver bound to loopback interface!"
+                   << " Cannot communicate with remote master(s)."
+                   << " You might want to set 'LIBPROCESS_IP' environment"
+                   << " variable to use a routable IP address.\n"
+                   << "**************************************************";
+    }
+
+    // Initialize logging.
+    if (flags.initialize_driver_logging) {
+      logging::initialize("mesos", flags);
+    } else {
+      VLOG(1) << "Disabling initialization of GLOG logging";
+    }
 
     LOG(INFO) << "Version: " << MESOS_VERSION;
 

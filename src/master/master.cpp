@@ -286,6 +286,15 @@ void Master::initialize()
   LOG(INFO) << "Master " << info_.id() << " (" << info_.hostname() << ")"
             << " started on " << string(self()).substr(7);
 
+  if (stringify(net::IP(ntohl(self().ip))) == "127.0.0.1") {
+    LOG(WARNING) << "\n**************************************************\n"
+                 << "Master bound to loopback interface!"
+                 << " Cannot communicate with remote schedulers or slaves."
+                 << " You might want to set '--ip' flag to a routable"
+                 << " IP address.\n"
+                 << "**************************************************";
+  }
+
   // NOTE: We enforce a minimum slave re-register timeout because the
   // slave bounds its (re-)registration retries based on the minimum.
   if (flags.slave_reregister_timeout < MIN_SLAVE_REREGISTER_TIMEOUT) {
@@ -450,6 +459,13 @@ void Master::initialize()
                const RoleInfo& roleInfo,
                roleInfos) {
     roles[role] = new Role(roleInfo);
+  }
+
+  // Verify the timeout is greater than zero.
+  if (flags.offer_timeout.isSome() &&
+      flags.offer_timeout.get() <= Duration::zero()) {
+    EXIT(1) << "Invalid value '" << flags.offer_timeout.get() << "' "
+            << "for --offer_timeout: Must be greater than zero.";
   }
 
   // Initialize the allocator.
@@ -1415,9 +1431,25 @@ void Master::reregisterFramework(
   if (!frameworkInfo.has_id() || frameworkInfo.id() == "") {
     LOG(ERROR) << "Framework re-registering without an id!";
     FrameworkErrorMessage message;
-    message.set_message("Framework reregistered without a framework id");
+    message.set_message("Framework reregistering without a framework id");
     send(from, message);
     return;
+  }
+
+  foreach (const shared_ptr<Framework>& framework, frameworks.completed) {
+    if (framework->id == frameworkInfo.id()) {
+      // This could happen if a framework tries to re-register after
+      // its failover timeout has elapsed or it unregistered itself
+      // by calling 'stop()' on the scheduler driver.
+      // TODO(vinod): Master should persist admitted frameworks to the
+      // registry and remove them from it after failover timeout.
+      LOG(WARNING) << "Completed framework " << framework->id
+                   << " attempted to re-register";
+      FrameworkErrorMessage message;
+      message.set_message("Completed framework attempted to re-register");
+      send(from, message);
+      return;
+    }
   }
 
   LOG(INFO) << "Received re-registration request from framework "
@@ -3535,6 +3567,15 @@ void Master::offer(const FrameworkID& frameworkId,
     framework->addOffer(offer);
     slave->addOffer(offer);
 
+    if (flags.offer_timeout.isSome()) {
+      // Rescind the offer after the timeout elapses.
+      offerTimers[offer->id()] =
+        delay(flags.offer_timeout.get(),
+              self(),
+              &Self::offerTimeout,
+              offer->id());
+    }
+
     // TODO(jieyu): For now, we strip 'ephemeral_ports' resource from
     // offers so that frameworks do not see this resource. This is a
     // short term workaround. Revisit this once we resolve MESOS-1654.
@@ -4386,6 +4427,17 @@ void Master::removeTask(Task* task)
 }
 
 
+void Master::offerTimeout(const OfferID& offerId)
+{
+  Offer* offer = getOffer(offerId);
+  if (offer != NULL) {
+    allocator->resourcesRecovered(
+        offer->framework_id(), offer->slave_id(), offer->resources(), None());
+    removeOffer(offer, true);
+  }
+}
+
+
 // TODO(vinod): Instead of 'removeOffer()', consider implementing
 // 'useOffer()', 'discardOffer()' and 'rescindOffer()' for clarity.
 void Master::removeOffer(Offer* offer, bool rescind)
@@ -4410,6 +4462,13 @@ void Master::removeOffer(Offer* offer, bool rescind)
     RescindResourceOfferMessage message;
     message.mutable_offer_id()->MergeFrom(offer->id());
     send(framework->pid, message);
+  }
+
+  // Remove and cancel offer removal timers. Canceling the Timers is
+  // only done to avoid having too many active Timers in libprocess.
+  if (offerTimers.contains(offer->id())) {
+    Timer::cancel(offerTimers[offer->id()]);
+    offerTimers.erase(offer->id());
   }
 
   // Delete it.

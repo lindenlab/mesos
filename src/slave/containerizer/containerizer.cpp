@@ -155,6 +155,21 @@ Try<Resources> Containerizer::resources(const Flags& flags)
 
 Try<Containerizer*> Containerizer::create(const Flags& flags, bool local)
 {
+  if (flags.isolation == "external") {
+    LOG(WARNING) << "The 'external' isolation flag is deprecated, "
+                 << "please update your flags to"
+                 << " '--containerizers=external'.";
+
+    Try<ExternalContainerizer*> containerizer =
+        ExternalContainerizer::create(flags);
+    if (containerizer.isError()) {
+      return Error("Could not create ExternalContainerizer: " +
+                   containerizer.error());
+    }
+
+    return containerizer.get();
+  }
+
   // TODO(benh): We need to store which containerizer or
   // containerizers were being used. See MESOS-1663.
 
@@ -181,8 +196,8 @@ Try<Containerizer*> Containerizer::create(const Flags& flags, bool local)
         containerizers.push_back(containerizer.get());
       }
     } else if (type == "external") {
-      Try<Containerizer*> containerizer =
-        ExternalContainerizer::create(flags, local);
+      Try<ExternalContainerizer*> containerizer =
+        ExternalContainerizer::create(flags);
       if (containerizer.isError()) {
         return Error("Could not create ExternalContainerizer: " +
                      containerizer.error());
@@ -268,6 +283,42 @@ map<string, string> executorEnvironment(
 
   return env;
 }
+
+
+// Helper method to build the environment map used to launch fetcher.
+map<string, string> fetcherEnvironment(
+    const CommandInfo& commandInfo,
+    const std::string& directory,
+    const Option<std::string>& user,
+    const Flags& flags)
+{
+  // Prepare the environment variables to pass to mesos-fetcher.
+  string uris = "";
+  foreach (const CommandInfo::URI& uri, commandInfo.uris()) {
+    uris += uri.value() + "+" +
+    (uri.has_executable() && uri.executable() ? "1" : "0") +
+    (uri.extract() ? "X" : "N");
+    uris += " ";
+  }
+  // Remove extra space at the end.
+  uris = strings::trim(uris);
+
+  map<string, string> environment;
+  environment["MESOS_EXECUTOR_URIS"] = uris;
+  environment["MESOS_WORK_DIRECTORY"] = directory;
+  if (user.isSome()) {
+    environment["MESOS_USER"] = user.get();
+  }
+  if (!flags.frameworks_home.empty()) {
+    environment["MESOS_FRAMEWORKS_HOME"] = flags.frameworks_home;
+  }
+  if (!flags.hadoop_home.empty()) {
+    environment["HADOOP_HOME"] = flags.hadoop_home;
+  }
+
+  return environment;
+}
+
 
 } // namespace slave {
 } // namespace internal {

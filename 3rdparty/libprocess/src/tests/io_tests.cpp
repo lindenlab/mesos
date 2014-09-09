@@ -128,11 +128,6 @@ TEST(IO, BufferedRead)
   Try<int> fd = os::open("file", O_RDONLY);
   ASSERT_SOME(fd);
 
-  // Read from blocking fd.
-  AWAIT_EXPECT_FAILED(io::read(fd.get()));
-
-  // Read from non-blocking fd.
-  ASSERT_TRUE(os::nonblock(fd.get()).isSome());
   AWAIT_EXPECT_EQ(data, io::read(fd.get()));
 
   ASSERT_SOME(os::close(fd.get()));
@@ -140,27 +135,19 @@ TEST(IO, BufferedRead)
   // Now read from pipes.
   int pipes[2];
 
-  // Create a blocking pipe.
+  // Test on a closed pipe.
   ASSERT_NE(-1, ::pipe(pipes));
-
-  // Test on a blocking pipe.
-  AWAIT_EXPECT_FAILED(io::read(pipes[0]));
-
   ASSERT_SOME(os::close(pipes[0]));
   ASSERT_SOME(os::close(pipes[1]));
 
-  // Test on a closed pipe.
   AWAIT_EXPECT_FAILED(io::read(pipes[0]));
 
-  // Create a nonblocking pipe for reading.
-  ASSERT_NE(-1, ::pipe(pipes));
-  ASSERT_SOME(os::nonblock(pipes[0]));
-
   // Test a successful read from the pipe.
-  Future<string> future = io::read(pipes[0]);
+  ASSERT_NE(-1, ::pipe(pipes));
 
   // At first, the future will not be ready until we write to and
   // close the pipe.
+  Future<string> future = io::read(pipes[0]);
   ASSERT_FALSE(future.isReady());
 
   ASSERT_SOME(os::write(pipes[1], data));
@@ -287,95 +274,6 @@ TEST(IO, DISABLED_BlockingWrite)
 
   ASSERT_SOME(os::close(pipes[0]));
   ASSERT_SOME(os::close(pipes[1]));
-}
-
-
-TEST(IO, splice)
-{
-  ASSERT_TRUE(GTEST_IS_THREADSAFE);
-
-  // Create a temporary file for splicing into.
-  Try<string> path = os::mktemp();
-  ASSERT_SOME(path);
-
-  Try<int> fd = os::open(
-      path.get(),
-      O_WRONLY | O_CREAT | O_TRUNC,
-      S_IRUSR | S_IWUSR | S_IRGRP | S_IRWXO);
-
-  ASSERT_SOME(fd);
-
-  ASSERT_SOME(os::nonblock(fd.get()));
-
-  // Use a pipe for doing the splicing.
-  int pipes[2];
-
-  // Start with a blocking pipe.
-  ASSERT_NE(-1, ::pipe(pipes));
-
-  // Test splicing on a blocking file descriptor.
-  AWAIT_EXPECT_FAILED(io::splice(pipes[1], fd.get()));
-
-  ASSERT_SOME(os::close(pipes[0]));
-  ASSERT_SOME(os::close(pipes[1]));
-
-  // Test on a closed file descriptor.
-  AWAIT_EXPECT_FAILED(io::splice(pipes[1], fd.get()));
-
-  // Now create a nonblocking pipe.
-  ASSERT_NE(-1, ::pipe(pipes));
-  ASSERT_SOME(os::nonblock(pipes[0]));
-  ASSERT_SOME(os::nonblock(pipes[1]));
-
-  // Test write to broken pipe.
-  ASSERT_SOME(os::close(pipes[0]));
-  AWAIT_EXPECT_FAILED(io::splice(pipes[1], fd.get()));
-
-  close(pipes[1]);
-
-  // Recreate a nonblocking pipe.
-  ASSERT_NE(-1, ::pipe(pipes));
-  ASSERT_SOME(os::nonblock(pipes[0]));
-  ASSERT_SOME(os::nonblock(pipes[1]));
-
-  // Test discard.
-  Future<Nothing> splice = io::splice(pipes[0], fd.get());
-  EXPECT_TRUE(splice.isPending());
-  splice.discard();
-  AWAIT_DISCARDED(splice);
-
-  // Now write data to the pipe and splice to the file.
-  string data =
-    "Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do "
-    "eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim "
-    "ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut "
-    "aliquip ex ea commodo consequat. Duis aute irure dolor in "
-    "reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla "
-    "pariatur. Excepteur sint occaecat cupidatat non proident, sunt in "
-    "culpa qui officia deserunt mollit anim id est laborum.";
-
-  // Create more data!
-  while (Bytes(data.size()) < Megabytes(1)) {
-    data.append(data);
-  }
-
-  splice = io::splice(pipes[0], fd.get());
-
-  AWAIT_READY(io::write(pipes[1], data));
-
-  // Closing the write pipe should cause an EOF on the read end, thus
-  // completing 'splice'.
-  ASSERT_SOME(os::close(pipes[1]));
-
-  AWAIT_READY(splice);
-
-  ASSERT_SOME(os::close(pipes[0]));
-  ASSERT_SOME(os::close(fd.get()));
-
-  // Now make sure all the data is there!
-  Try<string> read = os::read(path.get());
-  ASSERT_SOME(read);
-  EXPECT_EQ(data, read.get());
 }
 
 

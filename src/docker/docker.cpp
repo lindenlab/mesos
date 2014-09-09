@@ -34,10 +34,14 @@
 
 #include "docker/docker.hpp"
 
+#ifdef __linux__
 #include "linux/cgroups.hpp"
+#endif // __linux__
 
 #include "slave/containerizer/isolators/cgroups/cpushare.hpp"
 #include "slave/containerizer/isolators/cgroups/mem.hpp"
+
+using namespace mesos;
 
 using namespace mesos::internal::slave;
 
@@ -49,7 +53,7 @@ using std::string;
 using std::vector;
 
 
-template<class T>
+template <typename T>
 static Future<T> failure(
     const string& cmd,
     int status,
@@ -58,23 +62,6 @@ static Future<T> failure(
   return Failure(
       "Failed to '" + cmd + "': exit status = " +
       WSTRINGIFY(status) + " stderr = " + err);
-}
-
-
-// Asynchronously read stderr from subprocess.
-static Future<string> err(const Subprocess& s)
-{
-  CHECK_SOME(s.err());
-
-  Try<Nothing> nonblock = os::nonblock(s.err().get());
-  if (nonblock.isError()) {
-    return Failure("Cannot set nonblock for stderr: " + nonblock.error());
-  }
-
-  // TODO(tnachen): Although unlikely, it's possible to not capture
-  // the caller's failure message if io::read stderr fails. Can
-  // chain a callback to at least log.
-  return io::read(s.err().get());
 }
 
 
@@ -87,8 +74,9 @@ static Future<Nothing> _checkError(const string& cmd, const Subprocess& s)
 
   if (status.get() != 0) {
     // TODO(tnachen): Consider returning stdout as well.
-    return err(s).then(
-        lambda::bind(failure<Nothing>, cmd, status.get(), lambda::_1));
+    CHECK_SOME(s.err());
+    return io::read(s.err().get())
+      .then(lambda::bind(failure<Nothing>, cmd, status.get(), lambda::_1));
   }
 
   return Nothing();
@@ -99,7 +87,8 @@ static Future<Nothing> _checkError(const string& cmd, const Subprocess& s)
 // subprocess.
 static Future<Nothing> checkError(const string& cmd, const Subprocess& s)
 {
-  return s.status().then(lambda::bind(_checkError, cmd, s));
+  return s.status()
+    .then(lambda::bind(_checkError, cmd, s));
 }
 
 
@@ -109,23 +98,26 @@ Try<Docker> Docker::create(const string& path, bool validate)
     return Docker(path);
   }
 
+#ifdef __linux__
   // Make sure that cgroups are mounted, and at least the 'cpu'
   // subsystem is attached.
   Result<string> hierarchy = cgroups::hierarchy("cpu");
 
   if (hierarchy.isNone()) {
     return Error("Failed to find a mounted cgroups hierarchy "
-                 "for the 'cpu' subsystem, you probably need "
+                 "for the 'cpu' subsystem; you probably need "
                  "to mount cgroups manually!");
   }
+#endif // __linux__
 
-  std::string cmd = path + " info";
+  // Validate the version (and that we can use Docker at all).
+  string cmd = path + " version";
 
   Try<Subprocess> s = subprocess(
       cmd,
       Subprocess::PATH("/dev/null"),
-      Subprocess::PATH("/dev/null"),
-      Subprocess::PATH("/dev/null"));
+      Subprocess::PIPE(),
+      Subprocess::PIPE());
 
   if (s.isError()) {
     return Error(s.error());
@@ -134,18 +126,50 @@ Try<Docker> Docker::create(const string& path, bool validate)
   Future<Option<int> > status = s.get().status();
 
   if (!status.await(Seconds(5))) {
-    return Error("Docker info failed with time out");
+    return Error("Timed out waiting for '" + cmd + "'");
   } else if (status.isFailed()) {
-    return Error("Docker info failed: " + status.failure());
+    return Error("Failed to execute '" + cmd + "': " + status.failure());
   } else if (!status.get().isSome() || status.get().get() != 0) {
-    string msg = "Docker info failed to execute";
+    string msg = "Failed to execute '" + cmd + "': ";
     if (status.get().isSome()) {
-      msg += ", exited with status (" + WSTRINGIFY(status.get().get()) + ")";
+      msg += "exited with status " + WSTRINGIFY(status.get().get());
+    } else {
+      msg += "unknown exit status";
     }
     return Error(msg);
   }
 
-  return Docker(path);
+  CHECK_SOME(s.get().out());
+
+  Future<string> output = io::read(s.get().out().get());
+
+  if (!output.await(Seconds(5))) {
+    return Error("Timed out reading output from '" + cmd + "'");
+  } else if (output.isFailed()) {
+    return Error("Failed to read output from '" + cmd + "': " +
+                 output.failure());
+  }
+
+  foreach (string line, strings::split(output.get(), "\n")) {
+    line = strings::trim(line);
+    if (strings::startsWith(line, "Client version: ")) {
+      line = line.substr(strlen("Client version: "));
+      vector<string> version = strings::split(line, ".");
+      if (version.size() < 1) {
+        return Error("Failed to parse Docker version '" + line + "'");
+      }
+      Try<int> major = numify<int>(version[0]);
+      if (major.isError()) {
+        return Error("Failed to parse Docker major version '" +
+                     version[0] + "'");
+      } else if (major.get() < 1) {
+        break;
+      }
+      return Docker(path);
+    }
+  }
+
+  return Error("Insufficient version of Docker! Please upgrade to >= 1.0.0");
 }
 
 
@@ -209,13 +233,24 @@ Try<Docker::Container> Docker::Container::create(const JSON::Object& json)
 
 
 Future<Nothing> Docker::run(
-    const string& image,
-    const string& command,
+    const ContainerInfo& containerInfo,
+    const CommandInfo& commandInfo,
     const string& name,
-    const Option<mesos::Resources>& resources,
+    const string& sandboxDirectory,
+    const string& mappedDirectory,
+    const Option<Resources>& resources,
     const Option<map<string, string> >& env) const
 {
-  string cmd = path + " run -d";
+  if (!containerInfo.has_docker()) {
+    return Failure("No docker info found in container info");
+  }
+
+  const ContainerInfo::DockerInfo& dockerInfo = containerInfo.docker();
+
+  vector<string> argv;
+  argv.push_back(path);
+  argv.push_back("run");
+  argv.push_back("-d");
 
   if (resources.isSome()) {
     // TODO(yifan): Support other resources (e.g. disk, ports).
@@ -223,35 +258,110 @@ Future<Nothing> Docker::run(
     if (cpus.isSome()) {
       uint64_t cpuShare =
         std::max((uint64_t) (CPU_SHARES_PER_CPU * cpus.get()), MIN_CPU_SHARES);
-      cmd += " -c " + stringify(cpuShare);
+      argv.push_back("-c");
+      argv.push_back(stringify(cpuShare));
     }
 
     Option<Bytes> mem = resources.get().mem();
     if (mem.isSome()) {
       Bytes memLimit = std::max(mem.get(), MIN_MEMORY);
-      cmd += " -m " + stringify(memLimit.bytes());
+      argv.push_back("-m");
+      argv.push_back(stringify(memLimit.bytes()));
     }
   }
 
   if (env.isSome()) {
-    // TODO(tnachen): Use subprocess with args instead once we can
-    // handle splitting command string into args.
     foreachpair (string key, string value, env.get()) {
-      key = strings::replace(key, "\"", "\\\"");
-      value = strings::replace(value, "\"", "\\\"");
-      cmd += " -e \"" + key + "=" + value + "\"";
+      argv.push_back("-e");
+      argv.push_back(key + "=" + value);
     }
   }
 
-  cmd += " --net=host --name=" + name + " " + image + " " + command;
+  foreach (const Environment::Variable& variable,
+           commandInfo.environment().variables()) {
+    argv.push_back("-e");
+    argv.push_back(variable.name() + "=" + variable.value());
+  }
+
+  argv.push_back("-e");
+  argv.push_back("MESOS_SANDBOX=" + mappedDirectory);
+
+  foreach (const Volume& volume, containerInfo.volumes()) {
+    string volumeConfig = volume.container_path();
+    if (volume.has_host_path()) {
+      volumeConfig = volume.host_path() + ":" + volumeConfig;
+      if (volume.has_mode()) {
+        switch (volume.mode()) {
+          case Volume::RW: volumeConfig += ":rw"; break;
+          case Volume::RO: volumeConfig += ":ro"; break;
+          default: return Failure("Unsupported volume mode");
+        }
+      }
+    } else if (volume.has_mode() && !volume.has_host_path()) {
+      return Failure("Host path is required with mode");
+    }
+
+    argv.push_back("-v");
+    argv.push_back(volumeConfig);
+  }
+
+  // Mapping sandbox directory into the contianer mapped directory.
+  argv.push_back("-v");
+  argv.push_back(sandboxDirectory + ":" + mappedDirectory);
+
+  const string& image = dockerInfo.image();
+
+  // TODO(tnachen): Support more network options other than host
+  // networking that docker provides (ie: BRIDGE). We currently
+  // require host networking since if the docker container is
+  // expected to be an executor it needs to be able to communicate
+  // with the slave by the slave's PID. There can be more future work
+  // to allow a bridge to connect but this is not yet implemented.
+  argv.push_back("--net");
+  argv.push_back("host");
+
+  argv.push_back("--name");
+  argv.push_back(name);
+  argv.push_back(image);
+
+  if (commandInfo.shell()) {
+    if (!commandInfo.has_value()) {
+      return Failure("Shell specified but no command value provided");
+    }
+    argv.push_back("/bin/sh");
+    argv.push_back("-c");
+    argv.push_back(commandInfo.value());
+  } else {
+    if (commandInfo.has_value()) {
+      argv.push_back(commandInfo.value());
+    }
+
+    foreach (const string& argument, commandInfo.arguments()) {
+      argv.push_back(argument);
+    }
+  }
+
+  string cmd = strings::join(" ", argv);
 
   VLOG(1) << "Running " << cmd;
 
+  map<string, string> environment;
+
+  // Currently the Docker CLI picks up dockerconfig by looking for
+  // the config file in the $HOME directory. If one of the URIs
+  // provided is a docker config file we want docker to be able to
+  // pick it up from the sandbox directory where we store all the
+  // URI downloads.
+  environment["HOME"] = sandboxDirectory;
+
   Try<Subprocess> s = subprocess(
-      cmd,
+      path,
+      argv,
       Subprocess::PATH("/dev/null"),
-      Subprocess::PATH("/dev/null"),
-      Subprocess::PIPE());
+      Subprocess::PIPE(),
+      Subprocess::PIPE(),
+      None(),
+      environment);
 
   if (s.isError()) {
     return Failure(s.error());
@@ -330,6 +440,7 @@ Future<Nothing> Docker::rm(
 Future<Docker::Container> Docker::inspect(const string& container) const
 {
   const string cmd =  path + " inspect " + container;
+
   VLOG(1) << "Running " << cmd;
 
   Try<Subprocess> s = subprocess(
@@ -359,22 +470,19 @@ Future<Docker::Container> Docker::_inspect(
   if (!status.isSome()) {
     return Failure("No status found from '" + cmd + "'");
   } else if (status.get() != 0) {
-    return err(s).then(
-        lambda::bind(
-            failure<Docker::Container>,
-            cmd,
-            status.get(),
-            lambda::_1));
+    CHECK_SOME(s.err());
+    return io::read(s.err().get())
+      .then(lambda::bind(
+                failure<Docker::Container>,
+                cmd,
+                status.get(),
+                lambda::_1));
   }
 
   // Read to EOF.
   CHECK_SOME(s.out());
-  Try<Nothing> nonblock = os::nonblock(s.out().get());
-  if (nonblock.isError()) {
-    return Failure("Failed to accept nonblock stdout:" + nonblock.error());
-  }
-  Future<string> output = io::read(s.out().get());
-  return output.then(lambda::bind(&Docker::__inspect, lambda::_1));
+  return io::read(s.out().get())
+    .then(lambda::bind(&Docker::__inspect, lambda::_1));
 }
 
 
@@ -404,6 +512,54 @@ Future<Docker::Container> Docker::__inspect(const string& output)
   // not sufficiently unique and 'array.values.size() > 1'.
 
   return Failure("Failed to find container");
+}
+
+
+Future<Nothing> Docker::logs(
+    const std::string& container,
+    const std::string& directory)
+{
+  // Redirect the logs into stdout/stderr.
+  //
+  // TODO(benh): This is an intermediate solution for now until we can
+  // reliably stream the logs either from the CLI or from the REST
+  // interface directly. The problem is that it's possible that the
+  // 'docker logs --follow' command will be started AFTER the
+  // container has already terminated, and thus it will continue
+  // running forever because the container has stopped. Unfortunately,
+  // when we later remove the container that still doesn't cause the
+  // 'logs' process to exit. Thus, we wait some period of time until
+  // after the container has terminated in order to let any log data
+  // get flushed, then we kill the 'logs' process ourselves.  A better
+  // solution would be to first "create" the container, then start
+  // following the logs, then finally "start" the container so that
+  // when the container terminates Docker will properly close the log
+  // stream and 'docker logs' will exit. For more information, please
+  // see: https://github.com/docker/docker/issues/7020
+
+  string logs =
+    "logs() {\n"
+    "  " + path + " logs --follow $1 &\n"
+    "  pid=$!\n"
+    "  " + path + " wait $1 >/dev/null 2>&1\n"
+    "  sleep 10" // Sleep 10 seconds to make sure the logs are flushed.
+    "  kill -TERM $pid >/dev/null 2>&1 &\n"
+    "}\n"
+    "logs " + container;
+
+  VLOG(1) << "Running " << logs;
+
+  Try<Subprocess> s = subprocess(
+      logs,
+      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(path::join(directory, "stdout")),
+      Subprocess::PATH(path::join(directory, "stderr")));
+
+  if (s.isError()) {
+    return Failure("Unable to launch docker logs: " + s.error());
+  }
+
+  return Nothing();
 }
 
 
@@ -441,22 +597,19 @@ Future<list<Docker::Container> > Docker::_ps(
   if (!status.isSome()) {
     return Failure("No status found from '" + cmd + "'");
   } else if (status.get() != 0) {
-    return err(s).then(
-        lambda::bind(
-            failure<list<Docker::Container> >,
-            cmd,
-            status.get(),
-            lambda::_1));
+    CHECK_SOME(s.err());
+    return io::read(s.err().get())
+      .then(lambda::bind(
+                failure<list<Docker::Container> >,
+                cmd,
+                status.get(),
+                lambda::_1));
   }
 
   // Read to EOF.
   CHECK_SOME(s.out());
-  Try<Nothing> nonblock = os::nonblock(s.out().get());
-  if (nonblock.isError()) {
-    return Failure("Failed to accept nonblock stdout:" + nonblock.error());
-  }
-  Future<string> output = io::read(s.out().get());
-  return output.then(lambda::bind(&Docker::__ps, docker, prefix, lambda::_1));
+  return io::read(s.out().get())
+    .then(lambda::bind(&Docker::__ps, docker, prefix, lambda::_1));
 }
 
 

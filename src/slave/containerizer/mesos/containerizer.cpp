@@ -67,41 +67,6 @@ using state::RunState;
 Future<Nothing> _nothing() { return Nothing(); }
 
 
-// Helper method to build the environment map used to launch fetcher.
-map<string, string> fetcherEnvironment(
-    const CommandInfo& commandInfo,
-    const std::string& directory,
-    const Option<std::string>& user,
-    const Flags& flags)
-{
-  // Prepare the environment variables to pass to mesos-fetcher.
-  string uris = "";
-  foreach (const CommandInfo::URI& uri, commandInfo.uris()) {
-    uris += uri.value() + "+" +
-            (uri.has_executable() && uri.executable() ? "1" : "0") +
-            (uri.extract() ? "X" : "N");
-    uris += " ";
-  }
-  // Remove extra space at the end.
-  uris = strings::trim(uris);
-
-  map<string, string> environment;
-  environment["MESOS_EXECUTOR_URIS"] = uris;
-  environment["MESOS_WORK_DIRECTORY"] = directory;
-  if (user.isSome()) {
-    environment["MESOS_USER"] = user.get();
-  }
-  if (!flags.frameworks_home.empty()) {
-    environment["MESOS_FRAMEWORKS_HOME"] = flags.frameworks_home;
-  }
-  if (!flags.hadoop_home.empty()) {
-    environment["HADOOP_HOME"] = flags.hadoop_home;
-  }
-
-  return environment;
-}
-
-
 Try<MesosContainerizer*> MesosContainerizer::create(
     const Flags& flags,
     bool local)
@@ -406,14 +371,16 @@ Future<bool> MesosContainerizerProcess::launch(
     return Failure("Container already started");
   }
 
-  // TODO(tillt): The slave should expose which containerization
-  // mechanisms it supports to avoid scheduling tasks that it cannot
-  // run.
+  if (executorInfo.has_container()) {
+    // We return false as this containerizer does not support
+    // handling ContainerInfo.
+    return false;
+  }
+
   const CommandInfo& command = executorInfo.command();
   if (command.has_container()) {
     // We return false as this containerizer does not support
-    // handling ContainerInfo. Users have to be made aware of this
-    // lack of support to prevent confusion in the task configuration.
+    // handling ContainerInfo.
     return false;
   }
 
@@ -447,7 +414,7 @@ Future<bool> MesosContainerizerProcess::launch(
 
 Future<bool> MesosContainerizerProcess::launch(
     const ContainerID& containerId,
-    const TaskInfo&,
+    const TaskInfo& taskInfo,
     const ExecutorInfo& executorInfo,
     const string& directory,
     const Option<string>& user,
@@ -455,6 +422,12 @@ Future<bool> MesosContainerizerProcess::launch(
     const PID<Slave>& slavePid,
     bool checkpoint)
 {
+  if (taskInfo.has_container()) {
+    // We return false as this containerizer does not support
+    // handling ContainerInfo.
+    return false;
+  }
+
   return launch(
       containerId,
       executorInfo,
@@ -936,7 +909,6 @@ void MesosContainerizerProcess::_destroy(
         (future.isFailed() ? future.failure() : "discarded future"));
 
     destroying.erase(containerId);
-
     return;
   }
 

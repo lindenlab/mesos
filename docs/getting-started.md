@@ -10,8 +10,8 @@ There are different ways you can get Mesos:
 
 1. Download the latest stable release from [Apache](http://mesos.apache.org/downloads/) (***Recommended***)
 
-        $ wget http://www.apache.org/dist/mesos/0.19.0/mesos-0.19.0.tar.gz
-        $ tar -zxf mesos-0.19.0.tar.gz
+        $ wget http://www.apache.org/dist/mesos/0.20.0/mesos-0.20.0.tar.gz
+        $ tar -zxf mesos-0.20.0.tar.gz
 
 2. Clone the Mesos git [repository](http://git-wip-us.apache.org/repos/asf/mesos.git) (***Advanced Users Only***)
 
@@ -20,6 +20,8 @@ There are different ways you can get Mesos:
 ## System Requirements
 
 -  Mesos runs on Linux (64 Bit) and Mac OSX (64 Bit).
+
+### Ubuntu 12.04
 
 -  Following are the instructions for stock Ubuntu 12.04 64 Bit. If you are using a different OS please install the packages accordingly.
 
@@ -52,6 +54,18 @@ There are different ways you can get Mesos:
         # Install libtool.
         $ sudo apt-get install libtool
 
+### CentOS 6.5
+
+- Following are the instructions for stock CentOS 6.5. If you are using a different OS, please install the packages accordingly.
+
+        $ sudo yum groupinstall -y "Development Tools"
+
+        $ sudo yum install -y python-devel java-1.7.0-openjdk-devel zlib-devel libcurl-devel openssl-devel cyrus-sasl-devel cyrus-sasl-md5
+
+        # Install maven.
+        $ wget http://mirror.nexcess.net/apache/maven/maven-3/3.0.5/binaries/apache-maven-3.0.5-bin.tar.gz
+        $ sudo tar -zxcf apache-maven-3.0.5-bin.tar.gz -C /opt/
+        $ sudo ln -s /opt/apache-maven-3.0.5/bin/mvn /usr/bin/mvn
 
 ## Building Mesos
 

@@ -57,6 +57,7 @@ CLEAN_EXTRACTED =	\
   $(RY_HTTP_PARSER)	\
   $(PICOJSON)
 
+ALL_LOCAL = # Initialize ALL_LOCAL so we can add to it.
 
 # This is where the magic happens: we use stamp files as dependencies
 # which cause the packages to get extracted as necessary. We also
@@ -77,23 +78,41 @@ if WITH_BUNDLED_HTTP_PARSER
   $(RY_HTTP_PARSER)/http_parser.c: $(RY_HTTP_PARSER)-stamp
 endif
 
+if WITH_BUNDLED_PROTOBUF
+  $(PROTOBUF)/src/protoc $(PROTOBUF)/src/libprotobuf.la: $(PROTOBUF)-build-stamp
+
+  $(PROTOBUF)-build-stamp: $(PROTOBUF)-stamp
+	cd $(PROTOBUF) && ./configure $(CONFIGURE_ARGS) && \
+          $(MAKE) $(AM_MAKEFLAGS)
+	touch $@
+
+  LIBPROTOBUF = $(PROTOBUF)/src/libprotobuf.la
+
+else
+  LIBPROTOBUF = -lprotobuf
+endif
 
 # Convenience library for gmock/gtest.
 check_LTLIBRARIES = libgmock.la
-nodist_libgmock_la_SOURCES =		\
-  $(GTEST)/src/gtest-all.cc		\
-  $(GMOCK)/src/gmock-all.cc
-libgmock_la_CPPFLAGS =			\
-  -I$(GTEST)/include -I$(GTEST)		\
-  -I$(GMOCK)/include -I$(GMOCK)
+nodist_libgmock_la_SOURCES = gmock_sources.cc
+
+if WITH_BUNDLED_GMOCK
+  libgmock_la_CPPFLAGS =			\
+  -I$(GTEST)/include -I$(GTEST) -I$(GTEST)/src	\
+  -I$(GMOCK)/include -I$(GMOCK) -I$(GMOCK)/src
+
+  gmock_sources.cc: $(GMOCK)-stamp
+endif
+
+if LINKGTEST
+  libgmock_la_LIBADD = -lgtest
+endif
 
 
 # We list the sources in BUILT_SOURCES to make sure that the package
 # gets unarchived first.
 BUILT_SOURCES += $(nodist_libgmock_la_SOURCES)
 
-$(GMOCK)/src/gmock-all.cc: $(GMOCK)-stamp
-$(GTEST)/src/gtest-all.cc: $(GMOCK)-stamp
 
 if WITH_BUNDLED_GLOG
 # NOTE: We explicitely set GTEST_CONFIG=no so that we don't attempt to
@@ -119,13 +138,6 @@ $(LIBEV)/libev.la: $(LIBEV)-stamp
 	cd $(LIBEV) && ./configure $(CONFIGURE_ARGS) && \
           $(MAKE) $(AM_MAKEFLAGS)
 endif
-
-$(PROTOBUF)/src/protoc $(PROTOBUF)/src/libprotobuf.la: $(PROTOBUF)-build-stamp
-
-$(PROTOBUF)-build-stamp: $(PROTOBUF)-stamp
-	cd $(PROTOBUF) && ./configure $(CONFIGURE_ARGS) && \
-          $(MAKE) $(AM_MAKEFLAGS)
-	touch $@
 
 # Tests for stout.
 check_PROGRAMS = stout-tests
@@ -170,10 +182,13 @@ endif
 
 stout_tests_CPPFLAGS =				\
   -I$(srcdir)/$(STOUT)/include			\
-  -I$(GTEST)/include				\
-  -I$(GMOCK)/include				\
   -I$(PROTOBUF)/src				\
   $(AM_CPPFLAGS)
+
+if WITH_BUNDLED_GMOCK
+  stout_tests_CPPFLAGS += -I$(GTEST)/include
+  stout_tests_CPPFLAGS += -I$(GMOCK)/include
+endif
 
 if WITH_BUNDLED_BOOST
   stout_tests_CPPFLAGS += -I$(BOOST)
@@ -192,8 +207,8 @@ endif
 
 stout_tests_LDADD =			\
   libgmock.la				\
-  $(PROTOBUF)/src/libprotobuf.la	\
   $(LIBGLOG)				\
+  $(LIBPROTOBUF)			\
   -ldl
 
 # We use a check-local target for now to avoid the parallel test
@@ -204,10 +219,12 @@ check-local: stout-tests
 	./stout-tests
 
 # Dependencies for all-local.
-ALL_LOCAL =				\
-  $(STOUT)/Makefile			\
-  $(PROTOBUF)/src/libprotobuf.la	\
-  $(PROTOBUF)/src/protoc
+ALL_LOCAL += $(STOUT)/Makefile
+
+if WITH_BUNDLED_PROTOBUF
+  ALL_LOCAL += $(PROTOBUF)/src/libprotobuf.la
+  ALL_LOCAL += $(PROTOBUF)/src/protoc
+endif
 
 if WITH_BUNDLED_LIBEV
   ALL_LOCAL += $(LIBEV)/libev.la

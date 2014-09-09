@@ -74,7 +74,7 @@ public:
     add(&Flags::attributes,
         "attributes",
         "Attributes of machine, in the form:\n"
-        "rack:2 or 'rack:2,u:1'");
+        "rack:2 or 'rack:2;u:1'");
 
     add(&Flags::work_dir,
         "work_dir",
@@ -282,12 +282,19 @@ public:
     add(&Flags::default_container_image,
         "default_container_image",
         "The default container image to use if not specified by a task,\n"
-        "when using external containerizer");
+        "when using external containerizer.\n");
 
     add(&Flags::docker,
         "docker",
-        "The absolute path to the docker executable for docker containerizer.",
+        "The absolute path to the docker executable for docker\n"
+        "containerizer.\n",
         "docker");
+
+    add(&Flags::docker_sandbox_directory,
+        "docker_sandbox_directory",
+        "The absolute path for the directory in the container where the\n"
+        "sandbox is mapped to.\n",
+        "/mnt/mesos/sandbox");
 
 #ifdef WITH_NETWORK_ISOLATOR
     add(&Flags::ephemeral_ports_per_container,
@@ -347,6 +354,7 @@ public:
   std::string containerizers;
   Option<std::string> default_container_image;
   std::string docker;
+  std::string docker_sandbox_directory;
 #ifdef WITH_NETWORK_ISOLATOR
   uint16_t ephemeral_ports_per_container;
   Option<std::string> eth0_name;

@@ -18,6 +18,7 @@
 # which is necessary for dealing with naming conflicts, i.e,,
 # master/http.cpp and slave/http.cpp.
 AUTOMAKE_OPTIONS = subdir-objects
+MESOS_BUILD_DIR=@abs_top_builddir@
 
 include ../3rdparty/versions.am
 include ../3rdparty/libprocess/3rdparty/versions.am
@@ -38,14 +39,19 @@ PROTOBUF = $(LIBPROCESS)/3rdparty/protobuf-$(PROTOBUF_VERSION)
 PICOJSON = $(LIBPROCESS)/3rdparty/picojson-$(PICOJSON_VERSION)
 
 
-# Unfortunatley, 'pkglibexecdir' and 'pkglocalstatedir' are not set
+# Unfortunatley, 'pkglibexecdir' and 'pkgsysconfdir' are not set
 # before automake 1.11, so we need to set them manually (until we in
 # the future assume an automake version).
 pkglibexecdir = $(libexecdir)/$(PACKAGE)
-pkglocalstatedir = $(localstatedir)/$(PACKAGE)
+pkgsysconfdir = $(sysconfdir)/$(PACKAGE)
 
-# Protocol buffer compiler.
-PROTOC = ../$(PROTOBUF)/src/protoc
+if WITH_BUNDLED_PROTOBUF
+  # Protocol buffer compiler.
+  PROTOC = ../$(PROTOBUF)/src/protoc
+else
+  PROTOC = @PROTOCOMPILER@
+endif
+
 PROTOCFLAGS = -I$(top_srcdir)/include -I$(srcdir)
 
 # Initialize variables here so we can use += operator everywhere else.
@@ -58,7 +64,7 @@ dist_bin_SCRIPTS =
 dist_pkglibexec_SCRIPTS =
 nobase_dist_pkgdata_DATA =
 nodist_sbin_SCRIPTS =
-nobase_pkglocalstate_DATA =
+pkgsysconf_DATA =
 check_PROGRAMS =
 dist_check_SCRIPTS =
 check_SCRIPTS =
@@ -107,6 +113,10 @@ endif
 
 if WITH_NETWORK_ISOLATOR
   MESOS_CPPFLAGS += $(LIBNL_CFLAGS)
+endif
+
+if WITH_BUNDLED_PROTOBUF
+  MESOS_CPPFLAGS += -I../$(PROTOBUF)/src
 endif
 
 # README: we build the Mesos library out of a collection of
@@ -206,15 +216,24 @@ python/interface/src/mesos/interface/mesos_pb2.py: $(MESOS_PROTO)
 	$(PROTOC) -I$(top_srcdir)/include/mesos				\
 		$(PROTOCFLAGS) --python_out=python/interface/src/mesos/interface $^
 
-python/interface/src/mesos/interface/containerizer_pb2.py: $(CONTAINERIZER_PROTO)
+# All python protocol buffer code that imports from mesos.proto has
+# to get patched using sed, removing the leading 'mesos.' namespace
+# qualifier due to the flat hierachy in the resulting mesos.interface
+# egg. See MESOS-1750 for more.
+python/interface/src/mesos/interface/containerizer_pb2.py:		\
+		$(CONTAINERIZER_PROTO)
 	$(MKDIR_P) $(@D)
 	$(PROTOC) -I$(top_srcdir)/include/mesos/containerizer		\
-		$(PROTOCFLAGS) --python_out=python/interface/src/mesos/interface $^
+		$(PROTOCFLAGS)						\
+		--python_out=python/interface/src/mesos/interface $^
+	sed -e 's/mesos\.mesos_pb2/mesos_pb2/' <$@ >$@
 
 python/interface/src/mesos/interface/scheduler_pb2.py: $(SCHEDULER_PROTO)
 	$(MKDIR_P) $(@D)
 	$(PROTOC) -I$(top_srcdir)/include/mesos/scheduler		\
-		$(PROTOCFLAGS) --python_out=python/interface/src/mesos/interface $^
+		$(PROTOCFLAGS)						\
+		--python_out=python/interface/src/mesos/interface $^
+	sed -e 's/mesos\.mesos_pb2/mesos_pb2/' <$@ >$@
 
 # We even use a convenience library for most of Mesos so that we can
 # exclude third party libraries so setuptools/distribute can build a
@@ -408,6 +427,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
 	slave/containerizer/launcher.hpp				\
 	slave/containerizer/linux_launcher.hpp				\
 	slave/containerizer/isolators/posix.hpp				\
+	slave/containerizer/isolators/cgroups/constants.hpp		\
 	slave/containerizer/isolators/cgroups/cpushare.hpp		\
 	slave/containerizer/isolators/cgroups/mem.hpp			\
 	slave/containerizer/isolators/cgroups/perf_event.hpp		\
@@ -551,11 +571,11 @@ libmesos_la_LIBTOOLFLAGS = --tag=CXX
 # Add the convenience library.
 libmesos_la_LIBADD = libmesos_no_3rdparty.la
 
+libmesos_la_LIBADD += ../$(LIBPROCESS)/libprocess.la
+
 # For non-convenience libraries we need to link them in to make the shared
 # library each time. (Currently, we don't support platforms where this is not
 # possible.)
-libmesos_la_LIBADD += ../$(PROTOBUF)/src/libprotobuf.la
-
 if WITH_BUNDLED_GLOG
   libmesos_la_LIBADD += ../$(GLOG)/libglog.la
 else
@@ -578,7 +598,12 @@ else
   libmesos_la_LIBADD += -lzookeeper_mt
 endif
 
-libmesos_la_LIBADD += ../$(LIBPROCESS)/libprocess.la
+if WITH_BUNDLED_PROTOBUF
+  libmesos_la_LIBADD += ../$(PROTOBUF)/src/libprotobuf.la
+else
+  libmesos_la_LIBADD += -lprotobuf
+endif
+
 
 # Binaries.
 sbin_PROGRAMS += mesos-master
@@ -670,7 +695,7 @@ dist_mesospythonpkglibexec_SCRIPTS =					\
 # package name (i.e., 'mesos') as part of the path (i.e.,
 # /path/to/mesos/webui versus something like /path/to/webui). Note
 # that 'datadir' (e.g., /usr/local/share) is for read-only "data" and
-# 'localstatedir' (e.g., /usr/local/var) is for modifiable "data".
+# 'sysconfdir' (e.g., /usr/local/var) is for modifiable "data".
 nobase_dist_pkgdata_DATA +=						\
   webui/master/static/js/controllers.js					\
   webui/master/static/js/app.js						\
@@ -735,9 +760,9 @@ nodist_sbin_SCRIPTS += deploy/mesos-daemon.sh				\
   deploy/mesos-start-slaves.sh deploy/mesos-stop-cluster.sh		\
   deploy/mesos-stop-masters.sh deploy/mesos-stop-slaves.sh
 
-nobase_pkglocalstate_DATA += deploy/mesos-deploy-env.sh.template	\
-                             deploy/mesos-master-env.sh.template	\
-                             deploy/mesos-slave-env.sh.template
+pkgsysconf_DATA += deploy/mesos-deploy-env.sh.template	\
+                   deploy/mesos-master-env.sh.template	\
+                   deploy/mesos-slave-env.sh.template
 
 # Need to explicitly add this because by default DATA files are not
 # included in distributions.
@@ -781,8 +806,6 @@ EXTRA_DIST += $(EXAMPLES_SOURCE)
 
 
 if HAS_JAVA
-# Protobuf jar, copied there by Maven.
-PROTOBUF_JAR = java/target/protobuf-java-$(PROTOBUF_VERSION).jar
 
 $(MESOS_JAR): $(MESOS_JAR_SOURCE) $(MESOS_JAR_GENERATED) java/mesos.pom
 	@echo "Building mesos-$(PACKAGE_VERSION).jar ..."
@@ -847,44 +870,44 @@ BUILT_SOURCES += $(nodist_libjava_la_SOURCES)
 
 java/jni/org_apache_mesos_MesosSchedulerDriver.h: $(MESOS_JAR)
 	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):$(PROTOBUF_JAR)				\
+	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
 	  org.apache.mesos.MesosSchedulerDriver
 
 java/jni/org_apache_mesos_MesosExecutorDriver.h: $(MESOS_JAR)
 	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):$(PROTOBUF_JAR)				\
+	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
           org.apache.mesos.MesosExecutorDriver
 
 java/jni/org_apache_mesos_Log.h: $(MESOS_JAR)
 	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):$(PROTOBUF_JAR)				\
+	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
 	  org.apache.mesos.Log
 
 java/jni/org_apache_mesos_state_AbstractState.h: $(MESOS_JAR)
 	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):$(PROTOBUF_JAR)				\
+	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
 	  org.apache.mesos.state.AbstractState
 
 java/jni/org_apache_mesos_state_LevelDBState.h: $(MESOS_JAR)
 	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):$(PROTOBUF_JAR)				\
+	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
 	  org.apache.mesos.state.LevelDBState
 
 java/jni/org_apache_mesos_state_Variable.h: $(MESOS_JAR)
 	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):$(PROTOBUF_JAR)				\
+	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
 	  org.apache.mesos.state.Variable
 
 java/jni/org_apache_mesos_state_ZooKeeperState.h: $(MESOS_JAR)
 	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):$(PROTOBUF_JAR)				\
+	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
 	  org.apache.mesos.state.ZooKeeperState
 
 $(EXAMPLES_JAR): $(EXAMPLES_SOURCE)
 	@echo "Building examples.jar ..."
 	$(MKDIR_P) examples/java
 	$(JAVA_HOME)/bin/javac -source 1.6 -target 1.6			\
-          -cp ../$(ZOOKEEPER_JAR):$(PROTOBUF_JAR):$(MESOS_JAR):$(srcdir)/examples/java	\
+          -cp ../$(ZOOKEEPER_JAR):@PROTOBUF_JAR@:$(MESOS_JAR):$(srcdir)/examples/java	\
           -sourcepath $(srcdir)/examples/java -d examples/java	        \
           $(srcdir)/examples/java/*.java
 	$(JAVA_HOME)/bin/jar cf $@ -C examples/java .
@@ -932,17 +955,19 @@ DISTRIBUTE_EGG_SUFFIX = $(DISTRIBUTE_VERSION)$(PYTHON_EGG_PUREPY_POSTFIX).egg
 DISTRIBUTE_EGG = \
   $(abs_top_builddir)/$(DISTRIBUTE)/dist/distribute-$(DISTRIBUTE_EGG_SUFFIX)
 
-# Build a protobuf Python egg.
-PROTOBUF_EGG_SUFFIX = $(PROTOBUF_VERSION)$(PYTHON_EGG_PUREPY_POSTFIX).egg
-PROTOBUF_EGG = ../$(PROTOBUF)/python/dist/protobuf-$(PROTOBUF_EGG_SUFFIX)
+if WITH_BUNDLED_PROTOBUF
+  # Build a protobuf Python egg.
+  PROTOBUF_EGG_SUFFIX = $(PROTOBUF_VERSION)$(PYTHON_EGG_PUREPY_POSTFIX).egg
+  PROTOBUF_EGG = ../$(PROTOBUF)/python/dist/protobuf-$(PROTOBUF_EGG_SUFFIX)
 
-$(PROTOBUF_EGG):
+  $(PROTOBUF_EGG):
 	@echo "Building protobuf Python egg ..."
 	cd ../$(PROTOBUF)/python && \
           CC="$(CC)" CXX="$(CXX)" CFLAGS="$(CFLAGS)" CXXFLAGS="$(CXXFLAGS)" \
 	  PYTHONPATH=$(DISTRIBUTE_EGG) $(PYTHON) setup.py build bdist_egg
 
-CLEANFILES += $(PROTOBUF_EGG)
+  CLEANFILES += $(PROTOBUF_EGG)
+endif
 
 # This builds the mesos.native egg against libmesos_no_3rdparty.a that is
 # self-contained. It currently depends on the libraries in 3rdparty

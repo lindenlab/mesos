@@ -49,6 +49,7 @@ AC_CONFIG_SUBDIRS([3rdparty/stout])
 AC_CONFIG_FILES([Makefile])
 AC_CONFIG_FILES([include/Makefile])
 AC_CONFIG_FILES([3rdparty/Makefile])
+AC_CONFIG_FILES([3rdparty/gmock_sources.cc])
 
 AC_ARG_ENABLE([install],
               AS_HELP_STRING([--enable-install],
@@ -93,11 +94,18 @@ AC_ARG_WITH([libev],
             [without_bundled_libev=yes], [])
 
 AC_ARG_WITH([glog],
-        AS_HELP_STRING([--with-glog@<:@=DIR@:>@],
-                   [excludes building and using the bundled glog
-                   package in lieu of an installed version at a
-                   location prefixed by the given path]),
-        [without_bundled_glog=yes], [])
+            AS_HELP_STRING([--with-glog@<:@=DIR@:>@],
+                           [excludes building and using the bundled glog
+                            package in lieu of an installed version at a
+                            location prefixed by the given path]),
+            [without_bundled_glog=yes], [])
+
+AC_ARG_WITH([gmock],
+            AS_HELP_STRING([--with-gmock@<:@=DIR@:>@],
+                           [excludes building and using the bundled gmock
+                            package in lieu of an installed version at a
+                            location prefixed by the given path]),
+            [without_bundled_gmock=yes], [])
 
 AC_ARG_WITH([http-parser],
             AS_HELP_STRING([--with-http-parser@<:@=DIR@:>@],
@@ -106,17 +114,21 @@ AC_ARG_WITH([http-parser],
                            location prefixed by the given path]),
             [without_bundled_http_parser=yes], [])
 
+AC_ARG_WITH([protobuf],
+            AS_HELP_STRING([--with-protobuf@<:@=DIR@:>@],
+                           [excludes building and using the bundled protobuf
+                            package in lieu of an installed version at a
+                            location prefixed by the given path]),
+            [without_bundled_protobuf=yes], [])
+
 AC_ARG_WITH([zlib],
             AS_HELP_STRING([--without-zlib],
                            [disables zlib compression, which means the webui
                            will be far less responsive; not recommended]),
             [], [with_zlib=yes])
 
-AC_ARG_WITH([cxx11],
-            AS_HELP_STRING([--without-cxx11],
-                           [builds libprocess without C++11 support (deprecated)]),
-            [], [with_cxx11=yes])
-
+# There is no prefix installation of the JAR.
+AC_ARG_VAR([PROTOBUF_JAR], [full path to protobuf jar on prefixed builds])
 
 # Do some OS specific setup.
 case "${target_os}" in
@@ -132,7 +144,7 @@ case "${target_os}" in
 esac
 
 # Include directories used by package managers (e.g., MacPorts).
-if test "x$enable_bundled" = "xno" && \
+if test "x$enable_bundled" != "xyes" && \
    test "x$OS_NAME" = "xdarwin"; then
   CPPFLAGS="$CPPFLAGS -I/opt/local/include"
 fi
@@ -149,17 +161,85 @@ if test -n "`echo $with_picojson`"; then
   CPPFLAGS="$CPPFLAGS -I${with_picojson}/include"
 fi
 
+if test -n "`echo $with_libev`"; then
+  CPPFLAGS="$CPPFLAGS -I${with_libev}/include"
+  LDFLAGS="$LDFLAGS -L${with_libev}/lib"
+fi
+
 if test -n "`echo $with_glog`"; then
-  CPPFLAGS="$CPPFLAGS -I${with_glog}/src"
+  CPPFLAGS="$CPPFLAGS -I${with_glog}/include"
   LDFLAGS="$LDFLAGS -L${with_glog}/lib"
 fi
 
-if test -n "`echo $with_http-parser`"; then
-  CPPFLAGS="$CPPFLAGS -I${with_http-parser}/include"
+GMOCKSRC="gmock-all.cc"
+GTESTSRC="gtest-all.cc"
+
+if test -n "`echo $with_gmock`"; then
+  CPPFLAGS="$CPPFLAGS -I${with_gmock} -I${with_gmock}/include \
+    -I${with_gmock}/src -I${with_gmock}/gtest -I${with_gmock}/gtest/include \
+    -I${with_gmock}/gtest/src"
+
+elif test "x$enable_bundled" != "xyes"; then
+  CPPFLAGS="$CPPFLAGS -I/usr/src/gmock"
+  # On system installations the deps are handled separately.
+  # So insert a placeholder for substitution.
+  GTESTSRC="stdio.h"
+  check_gtest=yes
 fi
 
-# Check if user has asked us to use a preinstalled libev, or if they asked
-# us to ignore all bundled libraries while compiling and linking.
+if test -n "`echo $with_http_parser`"; then
+  CPPFLAGS="$CPPFLAGS -I${with_http_parser}/include"
+  LDFLAGS="$LDFLAGS -L${with_http_parser}/lib"
+fi
+
+if test -n "`echo $with_protobuf`"; then
+  CPPFLAGS="$CPPFLAGS -I${with_protobuf}/include"
+  LDFLAGS="$LDFLAGS -L${with_protobuf}/lib"
+fi
+
+# Check if user has asked us to use a preinstalled gmock, or if they
+# asked us to ignore all bundled libraries while compiling and
+# linking.
+if test "x$without_bundled_gmock" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  # Check if headers and library were located.
+  AC_CHECK_HEADER($GMOCKSRC,
+                  [found_gmock=yes],
+                  [])
+
+  if test "x$found_gmock" = "xyes"; then
+    if test "x$check_gtest" = "xyes"; then
+      # TODO(jieyu): Symbol _init is not availble for libs on OS X.
+      AC_CHECK_LIB([gtest],
+                   [_init],
+                   [],
+                   [AC_MSG_ERROR([gtest missing])])
+    fi
+    with_bundled_gmock=no
+  else
+    AC_MSG_ERROR([cannot find gmock
+-------------------------------------------------------------------
+You have requested the use of a non-bundled gmock but no suitable
+gmock could be found.
+
+You may want specify the location of gmock by providing a prefix
+path via --with-gmock=DIR, or check that the path you provided is
+correct if you're already doing this.
+-------------------------------------------------------------------
+])
+  fi
+else
+  with_bundled_gmock=yes
+fi
+
+AM_CONDITIONAL([WITH_BUNDLED_GMOCK], [test "x$with_bundled_gmock" = "xyes"])
+AM_CONDITIONAL([LINKGTEST], [test "check_gtest" = "xyes"])
+AC_SUBST([GMOCKSRC])
+AC_SUBST([GTESTSRC])
+
+# Check if user has asked us to use a preinstalled libev, or if they
+# asked us to ignore all bundled libraries while compiling and
+# linking.
 if test "x$without_bundled_libev" = "xyes" || \
    test "x$enable_bundled" != "xyes"; then
   # Check if headers and library were located.
@@ -186,8 +266,9 @@ fi
 
 AM_CONDITIONAL([WITH_BUNDLED_LIBEV], [test "x$with_bundled_libev" = "xyes"])
 
-# Check if user has asked us to use a preinstalled Boost, or if they asked
-# us to ignore all bundled libraries while compiling and linking.
+# Check if user has asked us to use a preinstalled Boost, or if they
+# asked us to ignore all bundled libraries while compiling and
+# linking.
 if test "x$without_bundled_boost" = "xyes" || \
    test "x$enable_bundled" != "xyes"; then
   # Check if headers and library were located.
@@ -213,8 +294,9 @@ fi
 
 AM_CONDITIONAL([WITH_BUNDLED_BOOST], [test "x$with_bundled_boost" = "xyes"])
 
-# Check if user has asked us to use a preinstalled picojson, or if they asked
-# us to ignore all bundled libraries while compiling and linking.
+# Check if user has asked us to use a preinstalled picojson, or if
+# they asked us to ignore all bundled libraries while compiling and
+# linking.
 if test "x$without_bundled_picojson" = "xyes" || \
    test "x$enable_bundled" != "xyes"; then
   # Check if headers and library were located.
@@ -241,15 +323,18 @@ fi
 AM_CONDITIONAL([WITH_BUNDLED_PICOJSON], [test "x$with_bundled_picojson" = "xyes"])
 
 
-# Check if user has asked us to use a preinstalled glog, or if they asked
-# us to ignore all bundled libraries while compiling and linking.
+# Check if user has asked us to use a preinstalled glog, or if they
+# asked us to ignore all bundled libraries while compiling and
+# linking.
 if test "x$without_bundled_glog" = "xyes" || \
    test "x$enable_bundled" != "xyes"; then
   # Check if headers and library were located.
   AC_CHECK_HEADERS([glog/logging.h],
-                   [AC_CHECK_LIB([glog],
-                                 [_init],
-                                 [found_glog=yes])])
+                   [AC_LINK_IFELSE(
+                        [AC_LANG_PROGRAM([#include <glog/logging.h>],[])],
+                        [TEST_LIBS="$TEST_LIBS -lglog"] [found_glog=yes],
+                        [AC_MSG_WARN([glog is not installed.])])])
+
   if test "x$found_glog" = "xyes"; then
     with_bundled_glog=no
   else
@@ -270,12 +355,16 @@ fi
 
 AM_CONDITIONAL([WITH_BUNDLED_GLOG], [test "x$with_bundled_glog" = "xyes"])
 
-# Check if user has asked us to use a preinstalled http-parser, or if they asked
-# us to ignore all bundled libraries while compiling and linking.
-if test "x$without_bundled_http_parse" = "xyes" || \
+# Check if user has asked us to use a preinstalled http-parser, or if
+# they asked us to ignore all bundled libraries while compiling and
+# linking.
+if test "x$without_bundled_http_parser" = "xyes" || \
    test "x$enable_bundled" != "xyes"; then
   # Check if headers and library were located.
-  AC_CHECK_HEADERS([http_parser.h], [found_http_parser=yes])
+  AC_CHECK_HEADERS([http_parser.h],
+                   [AC_CHECK_LIB([http_parser],
+                                 [http_parser_init],
+                                 [found_http_parser=yes])])
 
   if test "x$found_http_parser" = "xyes"; then
     with_bundled_http_parser=no
@@ -298,6 +387,63 @@ fi
 AM_CONDITIONAL([WITH_BUNDLED_HTTP_PARSER],
                [test "x$with_bundled_http_parser" = "xyes"])
 
+# Check if user has asked us to use a preinstalled protobuf, or if
+# they asked us to ignore all bundled libraries while compiling and
+# linking.
+if test "x$without_bundled_protobuf" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  # Use the system default prefix if not specified.
+  if test -n "`echo $with_protobuf`"; then
+    PROTOBUFPREFIX="${with_protobuf}"
+  elif test "x$enable_bundled" != "xyes"; then
+    PROTOBUFPREFIX="/usr"
+  fi
+
+  # Check for protobuf.
+  # TODO(jieyu): Symbol _init is not available for libs on OS X.
+  # Consider checking lib using AX_CXX_CHECK_LIB.
+  AC_CHECK_HEADERS([google/protobuf/message.h],
+                   [AC_CHECK_LIB([protobuf],
+                                 [_init],
+                                 [found_protobuf=yes])])
+
+  if test "x$found_protobuf" = "xyes"; then
+    with_bundled_protobuf=no
+    if test -z "`echo $PROTOBUF_JAR`"; then
+      PROTOBUF_JAR="${PROTOBUFPREFIX}/share/java/protobuf.jar"
+    fi
+
+    AC_CHECK_FILE([$PROTOBUF_JAR],
+                  [],
+                  [AC_MSG_ERROR([cannot find PROTOBUF_JAR=$PROTOBUF_JAR])])
+
+    AC_CHECK_TOOL([PROTOCOMPILER_TEST], [protoc], [], [$PROTOBUFPREFIX/bin])
+
+    if test -z "`echo $PROTOCOMPILER_TEST`"; then
+      AC_MSG_ERROR([protoc not found in PATH])
+    fi
+
+  else
+    AC_MSG_ERROR([cannot find protobuf
+-------------------------------------------------------------------
+You have requested the use of a non-bundled protobuf but no suitable
+protobuf could be found.
+
+You may want specify the location of protobuf by providing a prefix
+path via --with-protobuf=DIR, or check that the path you provided is
+correct if you're already doing this.
+-------------------------------------------------------------------
+])
+  fi
+else
+  with_bundled_protobuf=yes
+  PROTOBUF_JAR="\${MESOS_BUILD_DIR}/src/java/target/protobuf-java-2.5.0.jar"
+fi
+
+AM_CONDITIONAL([WITH_BUNDLED_PROTOBUF],
+               [test "x$with_bundled_protobuf" = "xyes"])
+
+AC_SUBST([PROTOBUF_JAR])
 
 # Default to gcc toolchain (we rely on some atomic builtins for now,
 # that are also present with clang).
@@ -329,14 +475,7 @@ AC_LANG_POP([C++])
 AC_MSG_RESULT([$CLANG])
 AC_SUBST([CLANG])
 
-# Force enable C++11 if compiling with clang.
-# Force disable C++11 if compiling with g++-4.7.
-if test "x$CLANG" = "xyes"; then
-  if test "x$with_cxx11" != "xyes"; then
-    AC_MSG_WARN([Force enabling C++11 for Clang build])
-  fi
-  with_cxx11=yes
-else
+if test "x$CLANG" = "xno"; then
   # Check the version of gcc and add any flags as appropriate. Note
   # that '-dumpversion' works for clang as well but as of clang 3.3 it
   # reports version 4.2.1 (for gcc backwards compatibility).
@@ -357,15 +496,14 @@ else
     CXXFLAGS="${CXXFLAGS} -Wno-unused-local-typedefs"
   fi
 
-  # Check for GCC version == 4.7 and disable C++11. The C++11 version
+  # Check for GCC version == 4.7 and fatal. The C++11 version
   # of libprocess' Future uses features that 4.7 doesn't support. The
   # non-C++11 version of libprocess' Future uses std::tr1 code that is
-  # only available without-cxx11.
+  # only available in non-C++11 builds.
   AX_COMPARE_VERSION([$GCC_VERSION], [eq2], [4.7],
                      [is_gxx47=yes], [is_gxx47=no])
   if test "x$is_gxx47" = "xyes"; then
-    AC_MSG_WARN([Force disabling C++11 for g++-4.7 build])
-    with_cxx11=no
+    AC_MSG_ERROR([Unable to build with g++-4.7 due to a std::tr1 and C++11 mismatch])
   fi
 fi
 
@@ -390,27 +528,26 @@ you can get away without it by doing --without-zlib.
 fi
 
 
-# Check if we should/can build with C++11.
-if test "x$with_cxx11" = "xyes"; then
-  AX_CXX_COMPILE_STDCXX_11([noext], [mandatory])
+# Ensure we can build the C++11 features we expect, and set the std
+# CXXFLAG as appropriate.
+AX_CXX_COMPILE_STDCXX_11([noext], [mandatory])
 
-  case "$host_os" in
-  darwin* )
-    # If we're using clang, we need to pass -stdlib=libc++ too.
-    if test "x$CLANG" = "xyes"; then
-      CXXFLAGS="$CXXFLAGS -stdlib=libc++"
-    fi
+case "$host_os" in
+darwin* )
+  # If we're using clang, we need to pass -stdlib=libc++ too.
+  if test "x$CLANG" = "xyes"; then
+    CXXFLAGS="$CXXFLAGS -stdlib=libc++"
+  fi
 
-    # GTEST on OSX needs its own tr1 tuple.
-    # TODO(dhamon): Update to gmock 1.7 and pass GTEST_LANG_CXX11 when in
-    # c++11 mode.
-    CXXFLAGS="$CXXFLAGS -DGTEST_USE_OWN_TR1_TUPLE=1"
-    ;;
-  esac
+  # GTEST on OSX needs its own tr1 tuple.
+  # TODO(dhamon): Update to gmock 1.7 and pass GTEST_LANG_CXX11 when in
+  # c++11 mode.
+  CXXFLAGS="$CXXFLAGS -DGTEST_USE_OWN_TR1_TUPLE=1"
+  ;;
+esac
 
-  # Also pass the flags to 3rdparty libraries.
-  CONFIGURE_ARGS="$CONFIGURE_ARGS CXXFLAGS='$CXXFLAGS'"
-fi
+# Also pass the flags to 3rdparty libraries.
+CONFIGURE_ARGS="$CONFIGURE_ARGS CXXFLAGS='$CXXFLAGS'"
 
 AC_CHECK_LIB([dl], [dlopen], [AC_MSG_RESULT([found])],
 	     [AC_MSG_ERROR([cannot find libdl

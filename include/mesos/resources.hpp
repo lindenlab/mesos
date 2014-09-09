@@ -67,6 +67,8 @@ bool matches(const Resource& left, const Resource& right);
 std::ostream& operator << (std::ostream& stream, const Resource& resource);
 
 
+// TODO(bmahler): Ensure that the underlying resources are kept
+// in a flattened state: MESOS-1714.
 class Resources
 {
 public:
@@ -191,6 +193,10 @@ public:
 
   // TODO(vinod): Provide a Ranges abstraction.
   Option<Value::Ranges> ports() const;
+
+  // Helper function to extract the given number of ports
+  // from the "ports" resource.
+  Option<Value::Ranges> ports(size_t numPorts) const;
 
   // TODO(jieyu): Consider returning an EphemeralPorts abstraction
   // which holds the ephemeral ports allocation logic.

@@ -129,7 +129,6 @@ TEST_F(SubprocessTest, PipeOutput)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s.get().out());
-  ASSERT_SOME(os::nonblock(s.get().out().get()));
   AWAIT_EXPECT_EQ("hello\n", io::read(s.get().out().get()));
 
   // Advance time until the internal reaper reaps the subprocess.
@@ -154,7 +153,6 @@ TEST_F(SubprocessTest, PipeOutput)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s.get().err());
-  ASSERT_SOME(os::nonblock(s.get().err().get()));
   AWAIT_EXPECT_EQ("hello\n", io::read(s.get().err().get()));
 
   // Advance time until the internal reaper reaps the subprocess.
@@ -189,7 +187,6 @@ TEST_F(SubprocessTest, PipeInput)
   ASSERT_SOME(os::write(s.get().in().get(), "hello\n"));
 
   ASSERT_SOME(s.get().out());
-  ASSERT_SOME(os::nonblock(s.get().out().get()));
   AWAIT_EXPECT_EQ("hello\n", io::read(s.get().out().get()));
 
   // Advance time until the internal reaper reaps the subprocess.
@@ -209,7 +206,7 @@ TEST_F(SubprocessTest, PipeInput)
 }
 
 
-TEST_F(SubprocessTest, PipeSplice)
+TEST_F(SubprocessTest, PipeRedirect)
 {
   Clock::pause();
 
@@ -234,7 +231,7 @@ TEST_F(SubprocessTest, PipeSplice)
 
   ASSERT_SOME(s.get().out());
   ASSERT_SOME(os::nonblock(s.get().out().get()));
-  AWAIT_READY(io::splice(s.get().out().get(), fd.get()));
+  AWAIT_READY(io::redirect(s.get().out().get(), fd.get()));
 
   // Advance time until the internal reaper reaps the subprocess.
   while (s.get().status().isPending()) {
@@ -337,7 +334,6 @@ TEST_F(SubprocessTest, PathInput)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s.get().out());
-  ASSERT_SOME(os::nonblock(s.get().out().get()));
   AWAIT_EXPECT_EQ("hello\n", io::read(s.get().out().get()));
 
   // Advance time until the internal reaper reaps the subprocess.
@@ -457,7 +453,6 @@ TEST_F(SubprocessTest, FdInput)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s.get().out());
-  ASSERT_SOME(os::nonblock(s.get().out().get()));
   AWAIT_EXPECT_EQ("hello\n", io::read(s.get().out().get()));
 
   // Advance time until the internal reaper reaps the subprocess.
@@ -636,7 +631,6 @@ TEST_F(SubprocessTest, Environment)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s.get().out());
-  ASSERT_SOME(os::nonblock(s.get().out().get()));
   AWAIT_EXPECT_EQ("hello\n", io::read(s.get().out().get()));
 
   // Advance time until the internal reaper reaps the subprocess.
@@ -666,7 +660,6 @@ TEST_F(SubprocessTest, Environment)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s.get().out());
-  ASSERT_SOME(os::nonblock(s.get().out().get()));
   AWAIT_EXPECT_EQ("hello world\n", io::read(s.get().out().get()));
 
   // Advance time until the internal reaper reaps the subprocess.
@@ -703,7 +696,6 @@ TEST_F(SubprocessTest, EnvironmentWithSpaces)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s.get().out());
-  ASSERT_SOME(os::nonblock(s.get().out().get()));
   AWAIT_EXPECT_EQ("hello world\n", io::read(s.get().out().get()));
 
   // Advance time until the internal reaper reaps the subprocess.
@@ -740,7 +732,6 @@ TEST_F(SubprocessTest, EnvironmentWithSpacesAndQuotes)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s.get().out());
-  ASSERT_SOME(os::nonblock(s.get().out().get()));
   AWAIT_EXPECT_EQ("\"hello world\"\n", io::read(s.get().out().get()));
 
   // Advance time until the internal reaper reaps the subprocess.
@@ -779,7 +770,6 @@ TEST_F(SubprocessTest, EnvironmentOverride)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s.get().out());
-  ASSERT_SOME(os::nonblock(s.get().out().get()));
   AWAIT_EXPECT_EQ("goodbye\n", io::read(s.get().out().get()));
 
   // Advance time until the internal reaper reaps the subprocess.

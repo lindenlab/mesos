@@ -35,9 +35,8 @@
 
 #include <process/defer.hpp>
 #include <process/delay.hpp>
-#include <process/future.hpp>
-#include <process/id.hpp>
 #include <process/dispatch.hpp>
+#include <process/future.hpp>
 #include <process/id.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
@@ -53,6 +52,7 @@
 #include <stout/flags.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/lambda.hpp>
+#include <stout/net.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
 #include <stout/stopwatch.hpp>
@@ -64,14 +64,12 @@
 #include "common/lock.hpp"
 #include "common/type_utils.hpp"
 
-#include "master/detector.hpp"
-
 #include "local/local.hpp"
-
-#include "master/detector.hpp"
 
 #include "logging/flags.hpp"
 #include "logging/logging.hpp"
+
+#include "master/detector.hpp"
 
 #include "messages/messages.hpp"
 
@@ -1090,8 +1088,22 @@ void MesosSchedulerDriver::initialize() {
   // Initialize libprocess.
   process::initialize(schedulerId);
 
+  if (stringify(net::IP(ntohl(process::ip()))) == "127.0.0.1") {
+    LOG(WARNING) << "\n**************************************************\n"
+                 << "Scheduler driver bound to loopback interface!"
+                 << " Cannot communicate with remote master(s)."
+                 << " You might want to set 'LIBPROCESS_IP' environment"
+                 << " variable to use a routable IP address.\n"
+                 << "**************************************************";
+  }
+
+  // Initialize logging.
   // TODO(benh): Replace whitespace in framework.name() with '_'?
-  logging::initialize(framework.name(), flags);
+  if (flags.initialize_driver_logging) {
+    logging::initialize(framework.name(), flags);
+  } else {
+    VLOG(1) << "Disabling initialization of GLOG logging";
+  }
 
   // Initialize mutex and condition variable. TODO(benh): Consider
   // using a libprocess Latch rather than a pthread mutex and

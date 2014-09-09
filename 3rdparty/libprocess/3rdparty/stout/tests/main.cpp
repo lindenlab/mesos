@@ -9,8 +9,7 @@ int main(int argc, char** argv)
   // Initialize Google Mock/Test.
   testing::InitGoogleMock(&argc, argv);
 
-  // Handles SIGSEGV, SIGILL, SIGFPE, SIGABRT, SIGBUS, SIGTERM
-  // by default.
+  // Install GLOG's signal handler.
   google::InstallFailureSignalHandler();
 
   return RUN_ALL_TESTS();

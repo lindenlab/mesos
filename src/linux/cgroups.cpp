@@ -1372,7 +1372,7 @@ public:
     }
 
     if (state.get() == "FROZEN") {
-      LOG(INFO) << "Successfullly froze cgroup "
+      LOG(INFO) << "Successfully froze cgroup "
                 << path::join(hierarchy, cgroup)
                 << " after " << (Clock::now() - start);
       promise.set(Nothing());
@@ -1479,18 +1479,21 @@ protected:
 private:
   static Future<Nothing> freezeTimedout(
       Future<Nothing> future,
-      const PID<TasksKiller>& pid,
-      const string& hierarchy,
-      const string& cgroup)
+      const PID<TasksKiller>& pid)
   {
     // Cancel the freeze operation.
     // TODO(jieyu): Wait until 'future' is in DISCARDED state before
     // starting retry.
     future.discard();
 
-    // Thaw the cgroup before trying to freeze again to allow any
+    // We attempt to kill the processes before we thaw again,
+    // due to a bug in the kernel. See MESOS-1758 for more details.
+    // We thaw the cgroup before trying to freeze again to allow any
     // pending signals to be delivered. See MESOS-1689 for details.
-    return cgroups::freezer::thaw(hierarchy, cgroup)
+    // This is a short term hack until we have PID namespace support.
+    return Future<bool>(true)
+      .then(defer(pid, &Self::kill))
+      .then(defer(pid, &Self::thaw))
       .then(defer(pid, &Self::freeze));
   }
 
@@ -1510,12 +1513,7 @@ private:
     // away from freezer once we have pid namespace support.
     return cgroups::freezer::freeze(hierarchy, cgroup).after(
         FREEZE_RETRY_INTERVAL,
-        lambda::bind(
-            &freezeTimedout,
-            lambda::_1,
-            self(),
-            hierarchy,
-            cgroup));
+        lambda::bind(&freezeTimedout, lambda::_1, self()));
   }
 
   Future<Nothing> kill()
@@ -1705,16 +1703,34 @@ Future<Nothing> destroy(const string& hierarchy, const string& cgroup)
 }
 
 
-namespace {
-
-Future<Nothing> discard(Future<Nothing> future)
+static void __destroy(
+    const Future<Nothing>& future,
+    const Owned<Promise<Nothing> >& promise,
+    const Duration& timeout)
 {
-  future.discard();
-
-  return future;
+  if (future.isReady()) {
+    promise->set(future.get());
+  } else if (future.isFailed()) {
+    promise->fail(future.failure());
+  } else {
+    promise->fail("Timed out after " + stringify(timeout));
+  }
 }
 
-} // namespace {
+
+static Future<Nothing> _destroy(
+    Future<Nothing> future,
+    const Duration& timeout)
+{
+  Owned<Promise<Nothing> > promise(new Promise<Nothing>());
+  Future<Nothing> _future = promise->future();
+
+  future.discard();
+  future.onAny(lambda::bind(&__destroy, lambda::_1, promise, timeout));
+
+  return _future;
+}
+
 
 Future<Nothing> destroy(
     const string& hierarchy,
@@ -1722,7 +1738,7 @@ Future<Nothing> destroy(
     const Duration& timeout)
 {
   return destroy(hierarchy, cgroup)
-    .after(timeout, lambda::bind(&discard, lambda::_1));
+    .after(timeout, lambda::bind(&_destroy, lambda::_1, timeout));
 }
 
 

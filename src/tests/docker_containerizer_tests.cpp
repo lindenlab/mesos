@@ -20,14 +20,18 @@
 #include <gtest/gtest.h>
 
 #include <process/future.hpp>
+#include <process/gmock.hpp>
 #include <process/subprocess.hpp>
 
 #include "linux/cgroups.hpp"
+
+#include "messages/messages.hpp"
 
 #include "tests/flags.hpp"
 #include "tests/mesos.hpp"
 
 #include "slave/containerizer/docker.hpp"
+#include "slave/paths.hpp"
 #include "slave/slave.hpp"
 #include "slave/state.hpp"
 
@@ -43,7 +47,9 @@ using mesos::internal::slave::Slave;
 using mesos::internal::slave::DockerContainerizer;
 
 using process::Future;
+using process::Message;
 using process::PID;
+using process::UPID;
 
 using std::vector;
 using std::list;
@@ -51,6 +57,7 @@ using std::string;
 
 using testing::_;
 using testing::DoDefault;
+using testing::Eq;
 using testing::Invoke;
 using testing::Return;
 
@@ -92,7 +99,6 @@ public:
       .WillRepeatedly(Invoke(this, &MockDockerContainerizer::_update));
   }
 
-
   MOCK_METHOD7(
       launch,
       process::Future<bool>(
@@ -103,7 +109,6 @@ public:
           const SlaveID&,
           const process::PID<slave::Slave>&,
           bool checkpoint));
-
 
   MOCK_METHOD8(
       launch,
@@ -191,7 +196,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Launch_Executor)
 
   MockDockerContainerizer dockerContainerizer(flags, docker);
 
-  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer);
+  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer, flags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -226,10 +231,19 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Launch_Executor)
   ExecutorID executorId;
   executorId.set_value("e1");
   executorInfo.mutable_executor_id()->CopyFrom(executorId);
+
   CommandInfo command;
   command.set_value("test-executor");
-  command.mutable_container()->set_image("docker:///mesosphere/test-executor");
   executorInfo.mutable_command()->CopyFrom(command);
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("mesosphere/test-executor");
+
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+  executorInfo.mutable_container()->CopyFrom(containerInfo);
 
   task.mutable_executor()->CopyFrom(executorInfo);
 
@@ -292,7 +306,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Launch)
 
   MockDockerContainerizer dockerContainerizer(flags, docker);
 
-  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer);
+  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer, flags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -324,11 +338,17 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Launch)
   task.mutable_resources()->CopyFrom(offer.resources());
 
   CommandInfo command;
-  CommandInfo::ContainerInfo* containerInfo = command.mutable_container();
-  containerInfo->set_image("docker:///busybox");
-  command.set_value("sleep 120");
+  command.set_value("sleep 1000");
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("busybox");
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
 
   task.mutable_command()->CopyFrom(command);
+  task.mutable_container()->CopyFrom(containerInfo);
 
   vector<TaskInfo> tasks;
   tasks.push_back(task);
@@ -359,8 +379,6 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Launch)
 
   ASSERT_TRUE(exists(containers.get(), containerId.get()));
 
-  dockerContainerizer.destroy(containerId.get());
-
   driver.stop();
   driver.join();
 
@@ -379,7 +397,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Kill)
 
   MockDockerContainerizer dockerContainerizer(flags, docker);
 
-  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer);
+  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer, flags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -411,11 +429,17 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Kill)
   task.mutable_resources()->CopyFrom(offer.resources());
 
   CommandInfo command;
-  CommandInfo::ContainerInfo* containerInfo = command.mutable_container();
-  containerInfo->set_image("docker:///busybox");
-  command.set_value("sleep 120");
+  command.set_value("sleep 1000");
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("busybox");
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
 
   task.mutable_command()->CopyFrom(command);
+  task.mutable_container()->CopyFrom(containerInfo);
 
   vector<TaskInfo> tasks;
   tasks.push_back(task);
@@ -509,13 +533,18 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Usage)
   task.mutable_resources()->CopyFrom(offer.resources());
 
   CommandInfo command;
-  CommandInfo::ContainerInfo* containerInfo = command.mutable_container();
-  containerInfo->set_image("docker:///busybox");
-
   // Run a CPU intensive command, so we can measure utime and stime later.
   command.set_value("dd if=/dev/zero of=/dev/null");
 
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("busybox");
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+
   task.mutable_command()->CopyFrom(command);
+  task.mutable_container()->CopyFrom(containerInfo);
 
   vector<TaskInfo> tasks;
   tasks.push_back(task);
@@ -572,7 +601,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Usage)
 
   AWAIT_READY(termination);
 
-  // Usage() should fail again since the container is destroyed
+  // Usage() should fail again since the container is destroyed.
   Future<ResourceStatistics> usage =
     dockerContainerizer.usage(containerId.get());
   AWAIT_FAILED(usage);
@@ -596,7 +625,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Update)
 
   MockDockerContainerizer dockerContainerizer(flags, docker);
 
-  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer);
+  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer, flags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -628,11 +657,17 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Update)
   task.mutable_resources()->CopyFrom(offer.resources());
 
   CommandInfo command;
-  CommandInfo::ContainerInfo* containerInfo = command.mutable_container();
-  containerInfo->set_image("docker:///busybox");
-  command.set_value("sleep 180");
+  command.set_value("sleep 1000");
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("busybox");
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
 
   task.mutable_command()->CopyFrom(command);
+  task.mutable_container()->CopyFrom(containerInfo);
 
   vector<TaskInfo> tasks;
   tasks.push_back(task);
@@ -699,12 +734,25 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Update)
   EXPECT_EQ(1024u, cpu.get());
   EXPECT_EQ(128u, mem.get().megabytes());
 
-  Future<containerizer::Termination> termination =
-    dockerContainerizer.wait(containerId.get());
+  newResources = Resources::parse("cpus:1;mem:144");
 
-  dockerContainerizer.destroy(containerId.get());
+  // Issue second update that uses the cached pid instead of inspect.
+  update = dockerContainerizer.update(containerId.get(), newResources.get());
 
-  AWAIT_READY(termination);
+  AWAIT_READY(update);
+
+  cpu = cgroups::cpu::shares(cpuHierarchy.get(), cpuCgroup.get());
+
+  ASSERT_SOME(cpu);
+
+  mem = cgroups::memory::soft_limit_in_bytes(
+      memoryHierarchy.get(),
+      memoryCgroup.get());
+
+  ASSERT_SOME(mem);
+
+  EXPECT_EQ(1024u, cpu.get());
+  EXPECT_EQ(144u, mem.get().megabytes());
 
   driver.stop();
   driver.join();
@@ -736,18 +784,32 @@ TEST_F(DockerContainerizerTest, DISABLED_ROOT_DOCKER_Recover)
 
   Resources resources = Resources::parse("cpus:1;mem:512").get();
 
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("busybox");
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+
+  CommandInfo commandInfo;
+  commandInfo.set_value("sleep 1000");
+
   Future<Nothing> d1 =
     docker.run(
-        "busybox",
-        "sleep 360",
+        containerInfo,
+        commandInfo,
         slave::DOCKER_NAME_PREFIX + stringify(containerId),
+        flags.work_dir,
+        flags.docker_sandbox_directory,
         resources);
 
   Future<Nothing> d2 =
     docker.run(
-        "busybox",
-        "sleep 360",
+        containerInfo,
+        commandInfo,
         slave::DOCKER_NAME_PREFIX + stringify(reapedContainerId),
+        flags.work_dir,
+        flags.docker_sandbox_directory,
         resources);
 
   AWAIT_READY(d1);
@@ -806,4 +868,765 @@ TEST_F(DockerContainerizerTest, DISABLED_ROOT_DOCKER_Recover)
   AWAIT_READY(termination);
 
   AWAIT_READY(reaped.get().status());
+}
+
+
+TEST_F(DockerContainerizerTest, ROOT_DOCKER_Logs)
+{
+  Try<PID<Master> > master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+
+  Docker docker = Docker::create(tests::flags.docker, false).get();
+
+  MockDockerContainerizer dockerContainerizer(flags, docker);
+
+  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer, flags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  Future<vector<Offer> > offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  const Offer& offer = offers.get()[0];
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->CopyFrom(offer.slave_id());
+  task.mutable_resources()->CopyFrom(offer.resources());
+
+  string uuid = UUID::random().toString();
+
+  CommandInfo command;
+  command.set_value("echo out" + uuid + " ; echo err" + uuid + " 1>&2");
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("busybox");
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+
+  task.mutable_command()->CopyFrom(command);
+  task.mutable_container()->CopyFrom(containerInfo);
+
+  vector<TaskInfo> tasks;
+  tasks.push_back(task);
+
+  Future<ContainerID> containerId;
+  Future<string> directory;
+  EXPECT_CALL(dockerContainerizer, launch(_, _, _, _, _, _, _, _))
+    .WillOnce(DoAll(FutureArg<0>(&containerId),
+                    FutureArg<3>(&directory),
+                    Invoke(&dockerContainerizer,
+                           &MockDockerContainerizer::_launch)));
+
+  Future<TaskStatus> statusRunning;
+  Future<TaskStatus> statusFinished;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusRunning))
+    .WillOnce(FutureArg<1>(&statusFinished))
+    .WillRepeatedly(DoDefault());
+
+  driver.launchTasks(offers.get()[0].id(), tasks);
+
+  AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY(directory);
+  AWAIT_READY_FOR(statusRunning, Seconds(60));
+  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  AWAIT_READY_FOR(statusFinished, Seconds(60));
+  EXPECT_EQ(TASK_FINISHED, statusFinished.get().state());
+
+  // Now check that the proper output is in stderr and stdout (which
+  // might also contain other things, hence the use of a UUID).
+  Try<string> read = os::read(path::join(directory.get(), "stderr"));
+
+  ASSERT_SOME(read);
+  EXPECT_TRUE(strings::contains(read.get(), "err" + uuid));
+  EXPECT_FALSE(strings::contains(read.get(), "out" + uuid));
+
+  read = os::read(path::join(directory.get(), "stdout"));
+
+  ASSERT_SOME(read);
+  EXPECT_TRUE(strings::contains(read.get(), "out" + uuid));
+  EXPECT_FALSE(strings::contains(read.get(), "err" + uuid));
+
+  driver.stop();
+  driver.join();
+
+  Shutdown();
+}
+
+
+// The following test uses a Docker image (mesosphere/inky) that has
+// an entrypoint "echo" and a default command "inky".
+TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD)
+{
+  Try<PID<Master> > master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+
+  Docker docker = Docker::create(tests::flags.docker, false).get();
+
+  MockDockerContainerizer dockerContainerizer(flags, docker);
+
+  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer, flags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  Future<vector<Offer> > offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  const Offer& offer = offers.get()[0];
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->CopyFrom(offer.slave_id());
+  task.mutable_resources()->CopyFrom(offer.resources());
+
+  CommandInfo command;
+  command.set_shell(false);
+
+  // NOTE: By not setting CommandInfo::value we're testing that we
+  // will still be able to run the container because it has a default
+  // entrypoint!
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("mesosphere/inky");
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+
+  task.mutable_command()->CopyFrom(command);
+  task.mutable_container()->CopyFrom(containerInfo);
+
+  vector<TaskInfo> tasks;
+  tasks.push_back(task);
+
+  Future<ContainerID> containerId;
+  Future<string> directory;
+  EXPECT_CALL(dockerContainerizer, launch(_, _, _, _, _, _, _, _))
+    .WillOnce(DoAll(FutureArg<0>(&containerId),
+                    FutureArg<3>(&directory),
+                    Invoke(&dockerContainerizer,
+                           &MockDockerContainerizer::_launch)));
+
+  Future<TaskStatus> statusRunning;
+  Future<TaskStatus> statusFinished;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusRunning))
+    .WillOnce(FutureArg<1>(&statusFinished))
+    .WillRepeatedly(DoDefault());
+
+  driver.launchTasks(offers.get()[0].id(), tasks);
+
+  AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY(directory);
+  AWAIT_READY_FOR(statusRunning, Seconds(60));
+  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  AWAIT_READY_FOR(statusFinished, Seconds(60));
+  EXPECT_EQ(TASK_FINISHED, statusFinished.get().state());
+
+  Try<string> read = os::read(path::join(directory.get(), "stdout"));
+
+  ASSERT_SOME(read);
+
+  // Since we're not passing any command value, we're expecting the
+  // default entry point to be run which is 'echo' with the default
+  // command from the image which is 'inky'.
+  EXPECT_TRUE(strings::contains(read.get(), "inky"));
+
+  read = os::read(path::join(directory.get(), "stderr"));
+  ASSERT_SOME(read);
+  EXPECT_FALSE(strings::contains(read.get(), "inky"));
+
+  driver.stop();
+  driver.join();
+
+  Shutdown();
+}
+
+
+// The following test uses a Docker image (mesosphere/inky) that has
+// an entrypoint "echo" and a default command "inky".
+TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD_Override)
+{
+  Try<PID<Master> > master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+
+  Docker docker = Docker::create(tests::flags.docker, false).get();
+
+  MockDockerContainerizer dockerContainerizer(flags, docker);
+
+  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer, flags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  Future<vector<Offer> > offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  const Offer& offer = offers.get()[0];
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->CopyFrom(offer.slave_id());
+  task.mutable_resources()->CopyFrom(offer.resources());
+
+  string uuid = UUID::random().toString();
+
+  CommandInfo command;
+  command.set_shell(false);
+
+  // We can set the value to just the 'uuid' since it should get
+  // passed as an argument to the entrypoint, i.e., 'echo uuid'.
+  command.set_value(uuid);
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("mesosphere/inky");
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+
+  task.mutable_command()->CopyFrom(command);
+  task.mutable_container()->CopyFrom(containerInfo);
+
+  vector<TaskInfo> tasks;
+  tasks.push_back(task);
+
+  Future<ContainerID> containerId;
+  Future<string> directory;
+  EXPECT_CALL(dockerContainerizer, launch(_, _, _, _, _, _, _, _))
+    .WillOnce(DoAll(FutureArg<0>(&containerId),
+                    FutureArg<3>(&directory),
+                    Invoke(&dockerContainerizer,
+                           &MockDockerContainerizer::_launch)));
+
+  Future<TaskStatus> statusRunning;
+  Future<TaskStatus> statusFinished;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusRunning))
+    .WillOnce(FutureArg<1>(&statusFinished))
+    .WillRepeatedly(DoDefault());
+
+  driver.launchTasks(offers.get()[0].id(), tasks);
+
+  AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY(directory);
+  AWAIT_READY_FOR(statusRunning, Seconds(60));
+  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  AWAIT_READY_FOR(statusFinished, Seconds(60));
+  EXPECT_EQ(TASK_FINISHED, statusFinished.get().state());
+
+  // Now check that the proper output is in stderr and stdout.
+  Try<string> read = os::read(path::join(directory.get(), "stdout"));
+
+  ASSERT_SOME(read);
+
+  // We expect the passed in command value to override the image's
+  // default command, thus we should see the value of 'uuid' in the
+  // output instead of the default command which is 'inky'.
+  EXPECT_TRUE(strings::contains(read.get(), uuid));
+  EXPECT_FALSE(strings::contains(read.get(), "inky"));
+
+  read = os::read(path::join(directory.get(), "stderr"));
+  ASSERT_SOME(read);
+  EXPECT_FALSE(strings::contains(read.get(), "inky"));
+  EXPECT_FALSE(strings::contains(read.get(), uuid));
+
+  driver.stop();
+  driver.join();
+
+  Shutdown();
+}
+
+
+// The following test uses a Docker image (mesosphere/inky) that has
+// an entrypoint "echo" and a default command "inky".
+TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD_Args)
+{
+  Try<PID<Master> > master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+
+  Docker docker = Docker::create(tests::flags.docker, false).get();
+
+  MockDockerContainerizer dockerContainerizer(flags, docker);
+
+  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer, flags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  Future<vector<Offer> > offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  const Offer& offer = offers.get()[0];
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->CopyFrom(offer.slave_id());
+  task.mutable_resources()->CopyFrom(offer.resources());
+
+  string uuid = UUID::random().toString();
+
+  CommandInfo command;
+  command.set_shell(false);
+
+  // We should also be able to skip setting the comamnd value and just
+  // set the arguments and those should also get passed through to the
+  // entrypoint!
+  command.add_arguments(uuid);
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("mesosphere/inky");
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+
+  task.mutable_command()->CopyFrom(command);
+  task.mutable_container()->CopyFrom(containerInfo);
+
+  vector<TaskInfo> tasks;
+  tasks.push_back(task);
+
+  Future<ContainerID> containerId;
+  Future<string> directory;
+  EXPECT_CALL(dockerContainerizer, launch(_, _, _, _, _, _, _, _))
+    .WillOnce(DoAll(FutureArg<0>(&containerId),
+                    FutureArg<3>(&directory),
+                    Invoke(&dockerContainerizer,
+                           &MockDockerContainerizer::_launch)));
+
+  Future<TaskStatus> statusRunning;
+  Future<TaskStatus> statusFinished;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusRunning))
+    .WillOnce(FutureArg<1>(&statusFinished))
+    .WillRepeatedly(DoDefault());
+
+  driver.launchTasks(offers.get()[0].id(), tasks);
+
+  AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY(directory);
+  AWAIT_READY_FOR(statusRunning, Seconds(60));
+  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  AWAIT_READY_FOR(statusFinished, Seconds(60));
+  EXPECT_EQ(TASK_FINISHED, statusFinished.get().state());
+
+  // Now check that the proper output is in stderr and stdout.
+  Try<string> read = os::read(path::join(directory.get(), "stdout"));
+
+  ASSERT_SOME(read);
+
+  // We expect the passed in command arguments to override the image's
+  // default command, thus we should see the value of 'uuid' in the
+  // output instead of the default command which is 'inky'.
+  EXPECT_TRUE(strings::contains(read.get(), uuid));
+  EXPECT_FALSE(strings::contains(read.get(), "inky"));
+
+  read = os::read(path::join(directory.get(), "stderr"));
+  ASSERT_SOME(read);
+  EXPECT_FALSE(strings::contains(read.get(), "inky"));
+  EXPECT_FALSE(strings::contains(read.get(), uuid));
+
+  driver.stop();
+  driver.join();
+
+  Shutdown();
+}
+
+
+// The slave is stopped before the first update for a task is received
+// from the executor. When it comes back up we make sure the executor
+// re-registers and the slave properly sends the update.
+TEST_F(DockerContainerizerTest, ROOT_DOCKER_SlaveRecoveryTaskContainer)
+{
+  Try<PID<Master> > master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+
+  // Setup recovery slave flags.
+  flags.checkpoint = true;
+  flags.recover = "reconnect";
+  flags.strict = true;
+
+  Docker docker = Docker::create(tests::flags.docker, false).get();
+
+  // We put the containerizer on the heap so we can more easily
+  // control it's lifetime, i.e., when we invoke the destructor.
+  MockDockerContainerizer* dockerContainerizer1 =
+    new MockDockerContainerizer(flags, docker);
+
+  Try<PID<Slave> > slave1 = StartSlave(dockerContainerizer1, flags);
+  ASSERT_SOME(slave1);
+
+  // Enable checkpointing for the framework.
+  FrameworkInfo frameworkInfo;
+  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  frameworkInfo.set_checkpoint(true);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  Future<vector<Offer> > offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  const Offer& offer = offers.get()[0];
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->CopyFrom(offer.slave_id());
+  task.mutable_resources()->CopyFrom(offer.resources());
+
+  CommandInfo command;
+  command.set_value("sleep 1000");
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("busybox");
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+
+  task.mutable_command()->CopyFrom(command);
+  task.mutable_container()->CopyFrom(containerInfo);
+
+  vector<TaskInfo> tasks;
+  tasks.push_back(task);
+
+  Future<ContainerID> containerId;
+  EXPECT_CALL(*dockerContainerizer1, launch(_, _, _, _, _, _, _, _))
+    .WillOnce(DoAll(FutureArg<0>(&containerId),
+                    Invoke(dockerContainerizer1,
+                           &MockDockerContainerizer::_launch)));
+
+  // Drop the first update from the executor.
+  Future<StatusUpdateMessage> statusUpdateMessage =
+    DROP_PROTOBUF(StatusUpdateMessage(), _, _);
+
+  driver.launchTasks(offers.get()[0].id(), tasks);
+
+  AWAIT_READY(containerId);
+
+  // Stop the slave before the status update is received.
+  AWAIT_READY(statusUpdateMessage);
+
+  Stop(slave1.get());
+
+  delete dockerContainerizer1;
+
+  Future<Message> reregisterExecutorMessage =
+    FUTURE_MESSAGE(Eq(ReregisterExecutorMessage().GetTypeName()), _, _);
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(_, _))
+    .WillOnce(FutureArg<1>(&status))
+    .WillRepeatedly(Return());       // Ignore subsequent updates.
+
+  MockDockerContainerizer* dockerContainerizer2 =
+    new MockDockerContainerizer(flags, docker);
+
+  Try<PID<Slave> > slave2 = StartSlave(dockerContainerizer2, flags);
+  ASSERT_SOME(slave2);
+
+  // Ensure the executor re-registers.
+  AWAIT_READY(reregisterExecutorMessage);
+  UPID executorPid = reregisterExecutorMessage.get().from;
+
+  ReregisterExecutorMessage reregister;
+  reregister.ParseFromString(reregisterExecutorMessage.get().body);
+
+  // Executor should inform about the unacknowledged update.
+  ASSERT_EQ(1, reregister.updates_size());
+  const StatusUpdate& update = reregister.updates(0);
+  ASSERT_EQ(task.task_id(), update.status().task_id());
+  ASSERT_EQ(TASK_RUNNING, update.status().state());
+
+  // Scheduler should receive the recovered update.
+  AWAIT_READY(status);
+  ASSERT_EQ(TASK_RUNNING, status.get().state());
+
+  // Make sure the container is still running.
+  Future<list<Docker::Container> > containers =
+    docker.ps(true, slave::DOCKER_NAME_PREFIX);
+
+  AWAIT_READY(containers);
+
+  ASSERT_TRUE(exists(containers.get(), containerId.get()));
+
+  driver.stop();
+  driver.join();
+
+  Shutdown();
+
+  delete dockerContainerizer2;
+}
+
+
+// The slave is stopped before the first update for a task is received
+// from the executor. When it comes back up we make sure the executor
+// re-registers and the slave properly sends the update.
+//
+// TODO(benh): This test is currently disabled because the executor
+// inside the image mesosphere/test-executor does not properly set the
+// executor PID that is uses during registration, so when the new
+// slave recovers it can't reconnect and instead destroys that
+// container. In particular, it uses '0' for it's IP which we properly
+// parse and can even properly use for sending other messages, but the
+// current implementation of 'UPID::operator bool ()' fails if the IP
+// component of a PID is '0'.
+TEST_F(DockerContainerizerTest,
+       DISABLED_ROOT_DOCKER_SlaveRecoveryExecutorContainer)
+{
+  Try<PID<Master> > master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+
+  // Setup recovery slave flags.
+  flags.checkpoint = true;
+  flags.recover = "reconnect";
+  flags.strict = true;
+
+  Docker docker = Docker::create(tests::flags.docker, false).get();
+
+  MockDockerContainerizer* dockerContainerizer1 =
+    new MockDockerContainerizer(flags, docker);
+
+  Try<PID<Slave> > slave1 = StartSlave(dockerContainerizer1, flags);
+  ASSERT_SOME(slave1);
+
+  // Enable checkpointing for the framework.
+  FrameworkInfo frameworkInfo;
+  frameworkInfo.CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  frameworkInfo.set_checkpoint(true);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  Future<vector<Offer> > offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  const Offer& offer = offers.get()[0];
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->CopyFrom(offer.slave_id());
+  task.mutable_resources()->CopyFrom(offer.resources());
+
+  ExecutorInfo executorInfo;
+  ExecutorID executorId;
+  executorId.set_value("e1");
+  executorInfo.mutable_executor_id()->CopyFrom(executorId);
+
+  CommandInfo command;
+  command.set_value("test-executor");
+  executorInfo.mutable_command()->CopyFrom(command);
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("mesosphere/test-executor");
+
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+  executorInfo.mutable_container()->CopyFrom(containerInfo);
+
+  task.mutable_executor()->CopyFrom(executorInfo);
+
+  vector<TaskInfo> tasks;
+  tasks.push_back(task);
+
+  Future<ContainerID> containerId;
+  Future<SlaveID> slaveId;
+  EXPECT_CALL(*dockerContainerizer1, launch(_, _, _, _, _, _, _))
+    .WillOnce(DoAll(FutureArg<0>(&containerId),
+                    FutureArg<4>(&slaveId),
+                    Invoke(dockerContainerizer1,
+                           &MockDockerContainerizer::_launchExecutor)));
+
+  // We need to wait until the container's pid has been been
+  // checkpointed so that when the next slave recovers it won't treat
+  // the executor as having gone lost! We know this has completed
+  // after Containerizer::launch returns and the
+  // Slave::executorLaunched gets dispatched.
+  Future<Nothing> executorLaunched =
+    FUTURE_DISPATCH(_, &Slave::executorLaunched);
+
+  // The test-executor in the image immediately sends a TASK_RUNNING
+  // followed by TASK_FINISHED (no sleep/delay in between) so we need
+  // to drop the first TWO updates that come from the executor rather
+  // than only the first update like above where we can control how
+  // the length of the task.
+  Future<StatusUpdateMessage> statusUpdateMessage1 =
+    DROP_PROTOBUF(StatusUpdateMessage(), _, _);
+
+  // Drop the first update from the executor.
+  Future<StatusUpdateMessage> statusUpdateMessage2 =
+    DROP_PROTOBUF(StatusUpdateMessage(), _, _);
+
+  driver.launchTasks(offers.get()[0].id(), tasks);
+
+  AWAIT_READY(containerId);
+  AWAIT_READY(slaveId);
+
+  AWAIT_READY(executorLaunched);
+  AWAIT_READY(statusUpdateMessage1);
+  AWAIT_READY(statusUpdateMessage2);
+
+  Stop(slave1.get());
+
+  delete dockerContainerizer1;
+
+  Future<Message> reregisterExecutorMessage =
+    FUTURE_MESSAGE(Eq(ReregisterExecutorMessage().GetTypeName()), _, _);
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(_, _))
+    .WillOnce(FutureArg<1>(&status))
+    .WillRepeatedly(Return());       // Ignore subsequent updates.
+
+  MockDockerContainerizer* dockerContainerizer2 =
+    new MockDockerContainerizer(flags, docker);
+
+  Try<PID<Slave> > slave2 = StartSlave(dockerContainerizer2, flags);
+  ASSERT_SOME(slave2);
+
+  // Ensure the executor re-registers.
+  AWAIT_READY(reregisterExecutorMessage);
+  UPID executorPid = reregisterExecutorMessage.get().from;
+
+  ReregisterExecutorMessage reregister;
+  reregister.ParseFromString(reregisterExecutorMessage.get().body);
+
+  // Executor should inform about the unacknowledged update.
+  ASSERT_EQ(1, reregister.updates_size());
+  const StatusUpdate& update = reregister.updates(0);
+  ASSERT_EQ(task.task_id(), update.status().task_id());
+  ASSERT_EQ(TASK_RUNNING, update.status().state());
+
+  // Scheduler should receive the recovered update.
+  AWAIT_READY(status);
+  ASSERT_EQ(TASK_RUNNING, status.get().state());
+
+  // Make sure the container is still running.
+  Future<list<Docker::Container> > containers =
+    docker.ps(true, slave::DOCKER_NAME_PREFIX);
+
+  AWAIT_READY(containers);
+
+  ASSERT_TRUE(exists(containers.get(), containerId.get()));
+
+  driver.stop();
+  driver.join();
+
+  Shutdown();
+
+  delete dockerContainerizer2;
 }

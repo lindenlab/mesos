@@ -33,6 +33,8 @@
 #include <stout/stringify.hpp>
 #include <stout/try.hpp>
 
+#include <stout/os/signals.hpp>
+
 #include "logging/logging.hpp"
 
 using process::Once;
@@ -69,18 +71,21 @@ string argv0;
 // allocate any memory or grab locks. And according to
 // https://code.google.com/p/google-glog/issues/detail?id=161
 // it should work in 'most' cases in signal handlers.
-void handler(int signal)
+inline void handler(int signal, siginfo_t *siginfo, void *context)
 {
   if (signal == SIGTERM) {
-    RAW_LOG(WARNING, "Received signal SIGTERM; exiting.");
+    if (siginfo->si_code == SI_USER ||
+        siginfo->si_code == SI_QUEUE ||
+        siginfo->si_code <= 0) {
+      RAW_LOG(WARNING, "Received signal SIGTERM from process %d of user %d; "
+                       "exiting", siginfo->si_pid, siginfo->si_uid);
+    } else {
+      RAW_LOG(WARNING, "Received signal SIGTERM; exiting");
+    }
 
     // Setup the default handler for SIGTERM so that we don't print
     // a stack trace.
-    struct sigaction action;
-    memset(&action, 0, sizeof(action));
-    sigemptyset(&action.sa_mask);
-    action.sa_handler = SIG_DFL;
-    sigaction(signal, &action, NULL);
+    os::signals::reset(signal);
     raise(signal);
   } else if (signal == SIGPIPE) {
     RAW_LOG(WARNING, "Received signal SIGPIPE; escalating to SIGABRT");
@@ -179,11 +184,14 @@ void initialize(
 
     // Set up our custom signal handlers.
     struct sigaction action;
-    action.sa_handler = handler;
+    action.sa_sigaction = handler;
 
     // Do not block additional signals while in the handler.
     sigemptyset(&action.sa_mask);
-    action.sa_flags = 0;
+
+    // The SA_SIGINFO flag tells sigaction() to use
+    // the sa_sigaction field, not sa_handler.
+    action.sa_flags = SA_SIGINFO;
 
     // Set up the SIGPIPE signal handler to escalate to SIGABRT
     // in order to have the glog handler catch it and print all

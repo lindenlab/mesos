@@ -166,6 +166,15 @@ void Slave::initialize()
 {
   LOG(INFO) << "Slave started on " << string(self()).substr(6);
 
+  if (stringify(net::IP(ntohl(self().ip))) == "127.0.0.1") {
+    LOG(WARNING) << "\n**************************************************\n"
+                 << "Slave bound to loopback interface!"
+                 << " Cannot communicate with remote master(s)."
+                 << " You might want to set '--ip' flag to a routable"
+                 << " IP address.\n"
+                 << "**************************************************";
+  }
+
 #ifdef __linux__
   // Move the slave into its own cgroup for each of the specified subsystems.
   // NOTE: Any subsystem configuration is inherited from the mesos root cgroup
@@ -1239,8 +1248,7 @@ void Slave::_runTask(
       // TODO(Charles Reiss): The isolator is not guaranteed to update
       // the resources before the executor acts on its RunTaskMessage.
       // TODO(idownes): Wait until this completes.
-      CHECK_SOME(executor->resources);
-      containerizer->update(executor->containerId, executor->resources.get());
+      containerizer->update(executor->containerId, executor->resources);
 
       LOG(INFO) << "Sending task '" << task.task_id()
                 << "' to executor '" << executorId
@@ -1834,8 +1842,7 @@ void Slave::registerExecutor(
       // that this will be delivered or (where necessary) acted on
       // before the executor gets its RunTaskMessages.
       // TODO(idownes): Wait until this completes.
-      CHECK_SOME(executor->resources);
-      containerizer->update(executor->containerId, executor->resources.get());
+      containerizer->update(executor->containerId, executor->resources);
 
       // Tell executor it's registered and give it any queued tasks.
       ExecutorRegisteredMessage message;
@@ -1968,8 +1975,7 @@ void Slave::reregisterExecutor(
 
       // Tell the containerizer to update the resources.
       // TODO(idownes): Wait until this completes.
-      CHECK_SOME(executor->resources);
-      containerizer->update(executor->containerId, executor->resources.get());
+      containerizer->update(executor->containerId, executor->resources);
 
       // Monitor the executor.
       monitor.start(
@@ -2170,8 +2176,7 @@ void Slave::statusUpdate(const StatusUpdate& update, const UPID& pid)
 
     // Wait until the container's resources have been updated before
     // sending the status update.
-    CHECK_SOME(executor->resources);
-    containerizer->update(executor->containerId, executor->resources.get())
+    containerizer->update(executor->containerId, executor->resources)
       .onAny(defer(self(),
                    &Slave::_statusUpdate,
                    lambda::_1,
@@ -2204,7 +2209,7 @@ void Slave::_statusUpdate(
     LOG(ERROR) << "Failed to update resources for container " << containerId
                << " of executor " << executorId
                << " running task " << update.status().task_id()
-               << " on status update for terminal task, destroying container:"
+               << " on status update for terminal task, destroying container: "
                << (future.get().isFailed() ? future.get().failure()
                                            : "discarded");
 
@@ -2491,7 +2496,9 @@ void Slave::executorLaunched(
     LOG(ERROR) << "Container '" << containerId
                << "' for executor '" << executorId
                << "' of framework '" << frameworkId
-               << "' failed to start: TaskInfo/ExecutorInfo not supported";
+               << "' failed to start: None of the enabled containerizers ("
+               << flags.containerizers << ") could create a container for the "
+               << "provided TaskInfo/ExecutorInfo message.";
     return;
   }
 
@@ -3322,8 +3329,16 @@ double Slave::_tasks_staging()
 {
   double count = 0.0;
   foreachvalue (Framework* framework, frameworks) {
+    count += framework->pending.size();
+
     foreachvalue (Executor* executor, framework->executors) {
       count += executor->queuedTasks.size();
+
+      foreach (Task* task, executor->launchedTasks.values()) {
+        if (task->state() == TASK_STAGING) {
+          count++;
+        }
+      }
     }
   }
   return count;
@@ -3593,7 +3608,9 @@ Executor* Framework::launchExecutor(
   // has non-zero resources to work with when the executor has
   // no resources. This should be revisited after MESOS-600.
   ExecutorInfo executorInfo_ = executor->info;
-  executorInfo_.mutable_resources()->MergeFrom(taskInfo.resources());
+  Resources resources = executorInfo_.resources();
+  resources += taskInfo.resources();
+  executorInfo_.mutable_resources()->CopyFrom(resources);
 
   // The command (either in form of task or executor command) can
   // define a specific user to run as. If present, this precedes the
@@ -3883,8 +3900,7 @@ Task* Executor::addTask(const TaskInfo& task)
 
   launchedTasks[task.task_id()] = t;
 
-  CHECK_SOME(resources);
-  resources = resources.get() + task.resources();
+  resources += task.resources();
 
   return t;
 }
@@ -3905,10 +3921,7 @@ void Executor::terminateTask(
   } else if (launchedTasks.contains(taskId)) {
     // Update the resources if it's been launched.
     task = launchedTasks[taskId];
-    CHECK_SOME(resources);
-    foreach (const Resource& resource, task->resources()) {
-      resources = resources.get() - resource;
-    }
+    resources -= task->resources();
     launchedTasks.erase(taskId);
   }
 
@@ -3981,8 +3994,7 @@ void Executor::recoverTask(const TaskState& state)
   // slave was down, the executor resources we capture here is an
   // upper-bound. The actual resources needed (for live tasks) by
   // the isolator will be calculated when the executor re-registers.
-  CHECK_SOME(resources);
-  resources = resources.get() + state.info.get().resources();
+  resources += state.info.get().resources();
 
   // Read updates to get the latest state of the task.
   foreach (const StatusUpdate& update, state.updates) {
