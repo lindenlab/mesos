@@ -249,16 +249,16 @@ TEST_F(MasterAuthorizationTest, KillTask)
   tasks.push_back(task);
 
   // Return a pending future from authorizer.
-  Future<Nothing> future;
+  Future<Nothing> authorize;
   Promise<bool> promise;
   EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
-    .WillOnce(DoAll(FutureSatisfy(&future),
+    .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
   driver.launchTasks(offers.get()[0].id(), tasks);
 
   // Wait until authorization is in progress.
-  AWAIT_READY(future);
+  AWAIT_READY(authorize);
 
   Future<TaskStatus> status;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -323,16 +323,16 @@ TEST_F(MasterAuthorizationTest, SlaveRemoved)
   tasks.push_back(task);
 
   // Return a pending future from authorizer.
-  Future<Nothing> future;
+  Future<Nothing> authorize;
   Promise<bool> promise;
   EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
-    .WillOnce(DoAll(FutureSatisfy(&future),
+    .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
   driver.launchTasks(offers.get()[0].id(), tasks);
 
   // Wait until authorization is in progress.
-  AWAIT_READY(future);
+  AWAIT_READY(authorize);
 
   Future<Nothing> slaveLost;
   EXPECT_CALL(sched, slaveLost(&driver, _))
@@ -407,16 +407,16 @@ TEST_F(MasterAuthorizationTest, SlaveDisconnected)
   tasks.push_back(task);
 
   // Return a pending future from authorizer.
-  Future<Nothing> future;
+  Future<Nothing> authorize;
   Promise<bool> promise;
   EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
-    .WillOnce(DoAll(FutureSatisfy(&future),
+    .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
   driver.launchTasks(offers.get()[0].id(), tasks);
 
   // Wait until authorization is in progress.
-  AWAIT_READY(future);
+  AWAIT_READY(authorize);
 
   EXPECT_CALL(sched, slaveLost(&driver, _))
     .Times(AtMost(1));
@@ -489,16 +489,16 @@ TEST_F(MasterAuthorizationTest, FrameworkRemoved)
   tasks.push_back(task);
 
   // Return a pending future from authorizer.
-  Future<Nothing> future;
+  Future<Nothing> authorize;
   Promise<bool> promise;
   EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
-    .WillOnce(DoAll(FutureSatisfy(&future),
+    .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
   driver.launchTasks(offers.get()[0].id(), tasks);
 
   // Wait until authorization is in progress.
-  AWAIT_READY(future);
+  AWAIT_READY(authorize);
 
   Future<Nothing> frameworkRemoved =
     FUTURE_DISPATCH(_, &AllocatorProcess::frameworkRemoved);
@@ -569,16 +569,16 @@ TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
   tasks1.push_back(task1);
 
   // Return a pending future from authorizer.
-  Future<Nothing> future;
+  Future<Nothing> authorize;
   Promise<bool> promise;
   EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
-    .WillOnce(DoAll(FutureSatisfy(&future),
+    .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
   driver.launchTasks(offers1.get()[0].id(), tasks1);
 
   // Wait until authorization is in progress.
-  AWAIT_READY(future);
+  AWAIT_READY(authorize);
 
   Future<vector<Offer> > offers2;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -758,26 +758,27 @@ TEST_F(MasterAuthorizationTest, DuplicateRegistration)
     .WillOnce(FutureSatisfy(&registered));
 
   // Return pending futures from authorizer.
-  Future<Nothing> future1;
+  Future<Nothing> authorize1;
   Promise<bool> promise1;
-  Future<Nothing> future2;
+  Future<Nothing> authorize2;
   Promise<bool> promise2;
   EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RegisterFramework&>()))
-    .WillOnce(DoAll(FutureSatisfy(&future1),
+    .WillOnce(DoAll(FutureSatisfy(&authorize1),
                     Return(promise1.future())))
-    .WillOnce(DoAll(FutureSatisfy(&future2),
-                    Return(promise2.future())));
+    .WillOnce(DoAll(FutureSatisfy(&authorize2),
+                    Return(promise2.future())))
+    .WillRepeatedly(Return(true)); // Authorize subsequent registration retries.
 
   driver.start();
 
   // Wait until first authorization attempt is in progress.
-  AWAIT_READY(future1);
+  AWAIT_READY(authorize1);
 
   // Simulate a spurious leading master change at the scheduler.
   detector.appoint(master.get());
 
   // Wait until second authorization attempt is in progress.
-  AWAIT_READY(future2);
+  AWAIT_READY(authorize2);
 
   // Now complete the first authorization attempt.
   promise1.set(true);
@@ -824,16 +825,17 @@ TEST_F(MasterAuthorizationTest, DuplicateReregistration)
     .WillOnce(FutureSatisfy(&registered));
 
   // Return pending futures from authorizer after the first attempt.
-  Future<Nothing> future2;
+  Future<Nothing> authorize2;
   Promise<bool> promise2;
-  Future<Nothing> future3;
+  Future<Nothing> authorize3;
   Promise<bool> promise3;
   EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RegisterFramework&>()))
     .WillOnce(Return(true))
-    .WillOnce(DoAll(FutureSatisfy(&future2),
+    .WillOnce(DoAll(FutureSatisfy(&authorize2),
                     Return(promise2.future())))
-    .WillOnce(DoAll(FutureSatisfy(&future3),
-                    Return(promise3.future())));
+    .WillOnce(DoAll(FutureSatisfy(&authorize3),
+                    Return(promise3.future())))
+    .WillRepeatedly(Return(true)); // Authorize subsequent registration retries.
 
   driver.start();
 
@@ -846,13 +848,13 @@ TEST_F(MasterAuthorizationTest, DuplicateReregistration)
   detector.appoint(master.get());
 
   // Wait until the second authorization attempt is in progress.
-  AWAIT_READY(future2);
+  AWAIT_READY(authorize2);
 
   // Simulate another spurious leading master change at the scheduler.
   detector.appoint(master.get());
 
   // Wait until the third authorization attempt is in progress.
-  AWAIT_READY(future3);
+  AWAIT_READY(authorize3);
 
   Future<Nothing> reregistered;
   EXPECT_CALL(sched, reregistered(&driver, _))
@@ -894,16 +896,17 @@ TEST_F(MasterAuthorizationTest, FrameworkRemovedBeforeRegistration)
       &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
 
   // Return a pending future from authorizer.
-  Future<Nothing> future;
+  Future<Nothing> authorize;
   Promise<bool> promise;
   EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RegisterFramework&>()))
-    .WillOnce(DoAll(FutureSatisfy(&future),
-                    Return(promise.future())));
+    .WillOnce(DoAll(FutureSatisfy(&authorize),
+                    Return(promise.future())))
+    .WillRepeatedly(Return(true)); // Authorize subsequent registration retries.
 
   driver.start();
 
   // Wait until authorization is in progress.
-  AWAIT_READY(future);
+  AWAIT_READY(authorize);
 
   // Stop the framework.
   // At this point the framework is disconnected but the master does
@@ -952,12 +955,13 @@ TEST_F(MasterAuthorizationTest, FrameworkRemovedBeforeReregistration)
     .WillOnce(FutureSatisfy(&registered));
 
   // Return a pending future from authorizer after first attempt.
-  Future<Nothing> future2;
+  Future<Nothing> authorize2;
   Promise<bool> promise2;
   EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RegisterFramework&>()))
     .WillOnce(Return(true))
-    .WillOnce(DoAll(FutureSatisfy(&future2),
-                    Return(promise2.future())));
+    .WillOnce(DoAll(FutureSatisfy(&authorize2),
+                    Return(promise2.future())))
+    .WillRepeatedly(Return(true)); // Authorize subsequent registration retries.
 
   driver.start();
 
@@ -974,7 +978,7 @@ TEST_F(MasterAuthorizationTest, FrameworkRemovedBeforeReregistration)
   detector.appoint(master.get());
 
   // Wait until the second authorization attempt is in progress.
-  AWAIT_READY(future2);
+  AWAIT_READY(authorize2);
 
   Future<Nothing> frameworkRemoved =
     FUTURE_DISPATCH(_, &AllocatorProcess::frameworkRemoved);

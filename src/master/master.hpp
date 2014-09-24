@@ -47,6 +47,7 @@
 #include <stout/multihashmap.hpp>
 #include <stout/option.hpp>
 
+#include "common/protobuf_utils.hpp"
 #include "common/type_utils.hpp"
 
 #include "files/files.hpp"
@@ -285,7 +286,7 @@ protected:
   void fileAttached(const process::Future<Nothing>& result,
                     const std::string& path);
 
-  // Return connected frameworks that are not in the process of being removed
+  // Return connected frameworks that are not in the process of being removed.
   std::vector<Framework*> getActiveFrameworks() const;
 
   // Invoked when the contender has entered the contest.
@@ -368,8 +369,18 @@ protected:
       const Filters& filters,
       const process::Future<std::list<process::Future<Option<Error> > > >& f);
 
-  // Remove a task.
+  // Transitions the task, and recovers resources if the task becomes
+  // terminal.
+  void updateTask(Task* task, const TaskStatus& status);
+
+  // Removes the task.
   void removeTask(Task* task);
+
+  // Remove an executor and recover its resources.
+  void removeExecutor(
+      Slave* slave,
+      const FrameworkID& frameworkId,
+      const ExecutorID& executorId);
 
   // Forwards the update to the framework.
   void forward(
@@ -833,7 +844,6 @@ struct Slave
     LOG(INFO) << "Adding task " << task->task_id()
               << " with resources " << task->resources()
               << " on slave " << id << " (" << info.hostname() << ")";
-    resourcesInUse += task->resources();
   }
 
   void removeTask(Task* task)
@@ -848,10 +858,6 @@ struct Slave
     }
 
     killedTasks.remove(task->framework_id(), task->task_id());
-    LOG(INFO) << "Removing task " << task->task_id()
-              << " with resources " << task->resources()
-              << " on slave " << id << " (" << info.hostname() << ")";
-    resourcesInUse -= task->resources();
   }
 
   void addOffer(Offer* offer)
@@ -861,7 +867,6 @@ struct Slave
     VLOG(1) << "Adding offer " << offer->id()
             << " with resources " << offer->resources()
             << " on slave " << id << " (" << info.hostname() << ")";
-    resourcesOffered += offer->resources();
   }
 
   void removeOffer(Offer* offer)
@@ -871,7 +876,6 @@ struct Slave
     VLOG(1) << "Removing offer " << offer->id()
             << " with resources " << offer->resources()
             << " on slave " << id << " (" << info.hostname() << ")";
-    resourcesOffered -= offer->resources();
   }
 
   bool hasExecutor(const FrameworkID& frameworkId,
@@ -889,23 +893,40 @@ struct Slave
       << " of framework " << frameworkId;
 
     executors[frameworkId][executorInfo.executor_id()] = executorInfo;
-
-    // Update the resources in use to reflect running this executor.
-    resourcesInUse += executorInfo.resources();
   }
 
   void removeExecutor(const FrameworkID& frameworkId,
                       const ExecutorID& executorId)
   {
-    if (hasExecutor(frameworkId, executorId)) {
-      // Update the resources in use to reflect removing this executor.
-      resourcesInUse -= executors[frameworkId][executorId].resources();
+    CHECK(hasExecutor(frameworkId, executorId))
+      << "Unknown executor " << executorId << " of framework " << frameworkId;
 
-      executors[frameworkId].erase(executorId);
-      if (executors[frameworkId].size() == 0) {
-        executors.erase(frameworkId);
+    executors[frameworkId].erase(executorId);
+    if (executors[frameworkId].empty()) {
+      executors.erase(frameworkId);
+    }
+  }
+
+  Resources used() const
+  {
+    Resources used;
+
+    foreachkey (const FrameworkID& frameworkId, tasks) {
+      foreachvalue (const Task* task, tasks.find(frameworkId)->second) {
+        if (!protobuf::isTerminalState(task->state())) {
+          used += task->resources();
+        }
       }
     }
+
+    foreachkey (const FrameworkID& frameworkId, executors) {
+      foreachvalue (const ExecutorInfo& executorInfo,
+                    executors.find(frameworkId)->second) {
+        used += executorInfo.resources();
+      }
+    }
+
+    return used;
   }
 
   const SlaveID id;
@@ -919,9 +940,6 @@ struct Slave
   // We mark a slave 'disconnected' when it has checkpointing
   // enabled because we expect it reregister after recovery.
   bool disconnected;
-
-  Resources resourcesOffered; // Resources offered.
-  Resources resourcesInUse;   // Resources used by tasks and executors.
 
   // Executors running on this slave.
   hashmap<FrameworkID, hashmap<ExecutorID, ExecutorInfo> > executors;
@@ -955,6 +973,8 @@ inline std::ostream& operator << (std::ostream& stream, const Slave& slave)
 
 
 // Information about a connected or completed framework.
+// TODO(bmahler): Keeping the task and executor information in sync
+// across the Slave and Framework structs is error prone!
 struct Framework
 {
   Framework(const FrameworkInfo& _info,
@@ -987,7 +1007,6 @@ struct Framework
       << " of framework " << task->framework_id();
 
     tasks[task->task_id()] = task;
-    resources += task->resources();
   }
 
   void addCompletedTask(const Task& task)
@@ -1005,14 +1024,12 @@ struct Framework
     addCompletedTask(*task);
 
     tasks.erase(task->task_id());
-    resources -= task->resources();
   }
 
   void addOffer(Offer* offer)
   {
     CHECK(!offers.contains(offer)) << "Duplicate offer " << offer->id();
     offers.insert(offer);
-    resources += offer->resources();
   }
 
   void removeOffer(Offer* offer)
@@ -1021,7 +1038,6 @@ struct Framework
       << "Unknown offer " << offer->id();
 
     offers.erase(offer);
-    resources -= offer->resources();
   }
 
   bool hasExecutor(const SlaveID& slaveId,
@@ -1039,23 +1055,44 @@ struct Framework
       << " on slave " << slaveId;
 
     executors[slaveId][executorInfo.executor_id()] = executorInfo;
-
-    // Update our resources to reflect running this executor.
-    resources += executorInfo.resources();
   }
 
   void removeExecutor(const SlaveID& slaveId,
                       const ExecutorID& executorId)
   {
-    if (hasExecutor(slaveId, executorId)) {
-      // Update our resources to reflect removing this executor.
-      resources -= executors[slaveId][executorId].resources();
+    CHECK(hasExecutor(slaveId, executorId))
+      << "Unknown executor " << executorId
+      << " of framework " << id
+      << " of slave " << slaveId;
 
-      executors[slaveId].erase(executorId);
-      if (executors[slaveId].size() == 0) {
-        executors.erase(slaveId);
+    executors[slaveId].erase(executorId);
+    if (executors[slaveId].empty()) {
+      executors.erase(slaveId);
+    }
+  }
+
+  Resources used() const
+  {
+    Resources used;
+
+    foreach (Offer* offer, offers) {
+      used += offer->resources();
+    }
+
+    foreachvalue (const Task* task, tasks) {
+      if (!protobuf::isTerminalState(task->state())) {
+        used += task->resources();
       }
     }
+
+    foreachkey (const SlaveID& slaveId, executors) {
+      foreachvalue (const ExecutorInfo& executorInfo,
+                    executors.find(slaveId)->second) {
+        used += executorInfo.resources();
+      }
+    }
+
+    return used;
   }
 
   const FrameworkID id; // TODO(benh): Store this in 'info'.
@@ -1081,8 +1118,6 @@ struct Framework
   boost::circular_buffer<memory::shared_ptr<Task> > completedTasks;
 
   hashset<Offer*> offers; // Active offers for framework.
-
-  Resources resources; // Total resources (tasks + offers + executors).
 
   hashmap<SlaveID, hashmap<ExecutorID, ExecutorInfo> > executors;
 
@@ -1112,7 +1147,7 @@ struct Role
   {
     Resources resources;
     foreachvalue (Framework* framework, frameworks) {
-      resources += framework->resources;
+      resources += framework->used();
     }
 
     return resources;

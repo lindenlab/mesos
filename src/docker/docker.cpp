@@ -132,7 +132,7 @@ Try<Docker> Docker::create(const string& path, bool validate)
   } else if (!status.get().isSome() || status.get().get() != 0) {
     string msg = "Failed to execute '" + cmd + "': ";
     if (status.get().isSome()) {
-      msg += "exited with status " + WSTRINGIFY(status.get().get());
+      msg += WSTRINGIFY(status.get().get());
     } else {
       msg += "unknown exit status";
     }
@@ -232,6 +232,45 @@ Try<Docker::Container> Docker::Container::create(const JSON::Object& json)
 }
 
 
+Try<Docker::Image> Docker::Image::create(const JSON::Object& json)
+{
+  Result<JSON::Value> entrypoint =
+    json.find<JSON::Value>("ContainerConfig.Entrypoint");
+
+  if (entrypoint.isError()) {
+    return Error("Failed to find 'ContainerConfig.Entrypoint': " +
+                 entrypoint.error());
+
+  } else if (entrypoint.isNone()) {
+    return Error("Unable to find 'ContainerConfig.Entrypoint'");
+  }
+
+  if (entrypoint.get().is<JSON::Null>()) {
+    return Docker::Image(None());
+  }
+
+  if (!entrypoint.get().is<JSON::Array>()) {
+    return Error("Unexpected type found for 'ContainerConfig.Entrypoint'");
+  }
+
+  const list<JSON::Value>& values = entrypoint.get().as<JSON::Array>().values;
+  if (values.size() == 0) {
+    return Docker::Image(None());
+  }
+
+  vector<string> result;
+
+  foreach (const JSON::Value& value, values) {
+    if (!value.is<JSON::String>()) {
+      return Error("Expecting 'ContainerConfig.EntryPoint' array of strings");
+    }
+    result.push_back(value.as<JSON::String>().value);
+  }
+
+  return Docker::Image(result);
+}
+
+
 Future<Nothing> Docker::run(
     const ContainerInfo& containerInfo,
     const CommandInfo& commandInfo,
@@ -253,7 +292,7 @@ Future<Nothing> Docker::run(
   argv.push_back("-d");
 
   if (resources.isSome()) {
-    // TODO(yifan): Support other resources (e.g. disk, ports).
+    // TODO(yifan): Support other resources (e.g. disk).
     Option<double> cpus = resources.get().cpus();
     if (cpus.isSome()) {
       uint64_t cpuShare =
@@ -311,14 +350,68 @@ Future<Nothing> Docker::run(
 
   const string& image = dockerInfo.image();
 
-  // TODO(tnachen): Support more network options other than host
-  // networking that docker provides (ie: BRIDGE). We currently
-  // require host networking since if the docker container is
-  // expected to be an executor it needs to be able to communicate
-  // with the slave by the slave's PID. There can be more future work
-  // to allow a bridge to connect but this is not yet implemented.
   argv.push_back("--net");
-  argv.push_back("host");
+  string network;
+  switch (dockerInfo.network()) {
+    case ContainerInfo::DockerInfo::HOST: network = "host"; break;
+    case ContainerInfo::DockerInfo::BRIDGE: network = "bridge"; break;
+    default: return Failure("Unsupported Network mode: " +
+                            stringify(dockerInfo.network()));
+  }
+
+  argv.push_back(network);
+
+  if (dockerInfo.port_mappings().size() > 0) {
+    if (network != "bridge") {
+      return Failure("Port mappings are only supported for bridge network");
+    }
+
+    if (!resources.isSome()) {
+      return Failure("Port mappings require resources");
+    }
+
+    Option<Value::Ranges> portRanges = resources.get().ports();
+
+    if (!portRanges.isSome()) {
+      return Failure("Port mappings require port resources");
+    }
+
+    foreach (const ContainerInfo::DockerInfo::PortMapping& mapping,
+             dockerInfo.port_mappings()) {
+      bool found = false;
+      foreach (const Value::Range& range, portRanges.get().range()) {
+        if (mapping.host_port() >= range.begin() &&
+            mapping.host_port() <= range.end()) {
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        return Failure("Port [" + stringify(mapping.host_port()) + "] not " +
+                       "included in resources");
+      }
+
+      string portMapping = stringify(mapping.host_port()) + ":" +
+                           stringify(mapping.container_port());
+
+      if (mapping.has_protocol()) {
+        portMapping += "/" + strings::lower(mapping.protocol());
+      }
+
+      argv.push_back("-p");
+      argv.push_back(portMapping);
+    }
+  }
+
+  if (commandInfo.shell()) {
+    // We override the entrypoint if shell is enabled because we
+    // assume the user intends to run the command within /bin/sh
+    // and not the default entrypoint of the image. View MESOS-1770
+    // for more details.
+    argv.push_back("--entrypoint");
+    argv.push_back("/bin/sh");
+  }
 
   argv.push_back("--name");
   argv.push_back(name);
@@ -328,7 +421,10 @@ Future<Nothing> Docker::run(
     if (!commandInfo.has_value()) {
       return Failure("Shell specified but no command value provided");
     }
-    argv.push_back("/bin/sh");
+
+    // Adding -c here because Docker cli only supports a single word
+    // for overriding entrypoint, so adding the -c flag for /bin/sh
+    // as part of the command.
     argv.push_back("-c");
     argv.push_back(commandInfo.value());
   } else {
@@ -640,4 +736,174 @@ Future<list<Docker::Container> > Docker::__ps(
   }
 
   return collect(futures);
+}
+
+
+Future<Docker::Image> Docker::pull(
+    const string& directory,
+    const string& image) const
+{
+  vector<string> argv;
+
+  string dockerImage = image;
+
+  // Check if the specified image has a tag. Also split on "/" in case
+  // the user specified a registry server (ie: localhost:5000/image)
+  // to get the actual image name. If no tag was given we add a
+  // 'latest' tag to avoid pulling down the repository.
+
+  vector<string> parts = strings::split(image, "/");
+
+  if (!strings::contains(parts.back(), ":")) {
+    dockerImage += ":latest";
+  }
+
+  argv.push_back(path);
+  argv.push_back("inspect");
+  argv.push_back(dockerImage);
+
+  string cmd = strings::join(" ", argv);
+
+  VLOG(1) << "Running " << cmd;
+
+  Try<Subprocess> s = subprocess(
+      path,
+      argv,
+      Subprocess::PATH("/dev/null"),
+      Subprocess::PIPE(),
+      Subprocess::PIPE(),
+      None());
+
+  if (s.isError()) {
+    return Failure("Failed to execute '" + cmd + "': " + s.error());
+  }
+
+  // We assume docker inspect to exit quickly and do not need to be
+  // discarded.
+  return s.get().status()
+    .then(lambda::bind(
+        &Docker::_pull,
+        *this,
+        s.get(),
+        directory,
+        dockerImage,
+        path));
+}
+
+
+Future<Docker::Image> Docker::_pull(
+    const Docker& docker,
+    const Subprocess& s,
+    const string& directory,
+    const string& image,
+    const string& path)
+{
+  Option<int> status = s.status().get();
+  if (status.isSome() && status.get() == 0) {
+    return io::read(s.out().get())
+      .then(lambda::bind(&Docker::___pull, lambda::_1));
+  }
+
+  vector<string> argv;
+  argv.push_back(path);
+  argv.push_back("pull");
+  argv.push_back(image);
+
+  string cmd = strings::join(" ", argv);
+
+  VLOG(1) << "Running " << cmd;
+
+  // Set HOME variable to pick up .dockercfg.
+  map<string, string> environment;
+
+  environment["HOME"] = directory;
+
+  Try<Subprocess> s_ = subprocess(
+      path,
+      argv,
+      Subprocess::PATH("/dev/null"),
+      Subprocess::PIPE(),
+      Subprocess::PIPE(),
+      None(),
+      environment);
+
+  if (s_.isError()) {
+    return Failure("Failed to execute '" + cmd + "': " + s_.error());
+  }
+
+  // Docker pull can run for a long time due to large images, so
+  // we allow the future to be discarded and it will kill the pull
+  // process.
+  return s_.get().status()
+    .then(lambda::bind(
+        &Docker::__pull,
+        docker,
+        s_.get(),
+        cmd,
+        directory,
+        image))
+    .onDiscard(lambda::bind(&Docker::pullDiscarded, s_.get(), cmd));
+}
+
+
+void Docker::pullDiscarded(const Subprocess& s, const string& cmd)
+{
+  VLOG(1) << "'" << cmd << "' is being discarded";
+  os::killtree(s.pid(), SIGKILL);
+}
+
+
+Future<Docker::Image> Docker::__pull(
+    const Docker& docker,
+    const Subprocess& s,
+    const string& cmd,
+    const string& directory,
+    const string& image)
+{
+  Option<int> status = s.status().get();
+
+  if (!status.isSome()) {
+    return Failure("No status found from '" +  cmd + "'");
+  } else if (status.get() != 0) {
+    return io::read(s.err().get())
+      .then(lambda::bind(&failure<Image>, cmd, status.get(), lambda::_1));
+  }
+
+  // We re-invoke Docker::pull in order to now do an 'inspect' since
+  // the image should be present (see Docker::pull).
+  // TODO(benh): Factor out inspect code from Docker::pull to be
+  // reused rather than this (potentially infinite) recursive call.
+  return docker.pull(directory, image);
+}
+
+
+Future<Docker::Image> Docker::___pull(
+    const string& output)
+{
+  Try<JSON::Array> parse = JSON::parse<JSON::Array>(output);
+
+  if (parse.isError()) {
+    return Failure("Failed to parse JSON: " + parse.error());
+  }
+
+  JSON::Array array = parse.get();
+
+  // Only return if only one image identified with name.
+  if (array.values.size() == 1) {
+    CHECK(array.values.front().is<JSON::Object>());
+
+    Try<Docker::Image> image =
+      Docker::Image::create(array.values.front().as<JSON::Object>());
+
+    if (image.isError()) {
+      return Failure("Unable to create image: " + image.error());
+    }
+
+    return image.get();
+  }
+
+  // TODO(tnachen): Handle the case where the short image ID was
+  // not sufficiently unique and 'array.values.size() > 1'.
+
+  return Failure("Failed to find image");
 }

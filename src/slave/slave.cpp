@@ -103,7 +103,8 @@ using namespace state;
 Slave::Slave(const slave::Flags& _flags,
              MasterDetector* _detector,
              Containerizer* _containerizer,
-             Files* _files)
+             Files* _files,
+             GarbageCollector* _gc)
   : ProcessBase(process::ID::generate("slave")),
     state(RECOVERING),
     http(this),
@@ -113,6 +114,7 @@ Slave::Slave(const slave::Flags& _flags,
     containerizer(_containerizer),
     files(_files),
     metrics(*this),
+    gc(_gc),
     monitor(containerizer),
     statusUpdateManager(new StatusUpdateManager()),
     metaDir(paths::getMetaRootDir(flags.work_dir)),
@@ -176,16 +178,19 @@ void Slave::initialize()
   }
 
 #ifdef __linux__
-  // Move the slave into its own cgroup for each of the specified subsystems.
-  // NOTE: Any subsystem configuration is inherited from the mesos root cgroup
-  // for that subsystem, e.g., by default the memory cgroup will be unlimited.
+  // Move the slave into its own cgroup for each of the specified
+  // subsystems.
+  // NOTE: Any subsystem configuration is inherited from the mesos
+  // root cgroup for that subsystem, e.g., by default the memory
+  // cgroup will be unlimited.
   if (flags.slave_subsystems.isSome()) {
     foreach (const string& subsystem,
             strings::tokenize(flags.slave_subsystems.get(), ",")) {
       LOG(INFO) << "Moving slave process into its own cgroup for"
                 << " subsystem: " << subsystem;
 
-      // Ensure the subsystem is mounted and the Mesos root cgroup is present.
+      // Ensure the subsystem is mounted and the Mesos root cgroup is
+      // present.
       Try<string> hierarchy = cgroups::prepare(
           flags.cgroups_hierarchy,
           subsystem,
@@ -194,20 +199,18 @@ void Slave::initialize()
       if (hierarchy.isError()) {
         EXIT(1) << "Failed to prepare cgroup " << flags.cgroups_root
                 << " for subsystem " << subsystem
-                << " under hierarchy " << hierarchy.get()
-                << " for slave: " + hierarchy.error();
+                << ": " << hierarchy.error();
       }
 
       // Create a cgroup for the slave.
       string cgroup = path::join(flags.cgroups_root, "slave");
 
       Try<bool> exists = cgroups::exists(hierarchy.get(), cgroup);
-
       if (exists.isError()) {
         EXIT(1) << "Failed to find cgroup " << cgroup
                 << " for subsystem " << subsystem
                 << " under hierarchy " << hierarchy.get()
-                << " for slave: " + exists.error();
+                << " for slave: " << exists.error();
       }
 
       if (!exists.get()) {
@@ -216,7 +219,7 @@ void Slave::initialize()
           EXIT(1) << "Failed to create cgroup " << cgroup
                   << " for subsystem " << subsystem
                   << " under hierarchy " << hierarchy.get()
-                  << " for slave: " + create.error();
+                  << " for slave: " << create.error();
         }
       }
 
@@ -227,17 +230,16 @@ void Slave::initialize()
         EXIT(1) << "Failed to check for existing threads in cgroup " << cgroup
                 << " for subsystem " << subsystem
                 << " under hierarchy " << hierarchy.get()
-                << " for slave: " + processes.error();
+                << " for slave: " << processes.error();
       }
 
-      // TODO(idownes): Re-evaluate this behavior if it's observed, possibly
-      // automatically killing any running processes and moving this code to
-      // during recovery.
+      // TODO(idownes): Re-evaluate this behavior if it's observed,
+      // possibly automatically killing any running processes and
+      // moving this code to during recovery.
       if (!processes.get().empty()) {
         EXIT(1) << "A slave (or child process) is still running, "
                 << "please check the process(es) '"
-                << stringify(processes.get())
-                << "' listed in "
+                << stringify(processes.get()) << "' listed in "
                 << path::join(hierarchy.get(), cgroup, "cgroups.proc");
       }
 
@@ -247,7 +249,7 @@ void Slave::initialize()
         EXIT(1) << "Failed to move slave into cgroup " << cgroup
                 << " for subsystem " << subsystem
                 << " under hierarchy " << hierarchy.get()
-                << " for slave: " + assign.error();
+                << " for slave: " << assign.error();
       }
     }
   }
@@ -637,7 +639,7 @@ void Slave::detected(const Future<Option<MasterInfo> >& _master)
       delay(duration,
             self(),
             &Slave::doReliableRegistration,
-            flags.registration_backoff_factor * 2); // Backoff
+            flags.registration_backoff_factor * 2); // Backoff.
     }
   }
 
@@ -892,6 +894,18 @@ void Slave::doReliableRegistration(const Duration& duration)
     message.mutable_slave()->CopyFrom(info);
 
     foreachvalue (Framework* framework, frameworks) {
+      // TODO(bmahler): We need to send the executors for these
+      // pending tasks, and we need to send exited events if they
+      // cannot be launched: MESOS-1715 MESOS-1720.
+
+      typedef hashmap<TaskID, TaskInfo> TaskMap;
+      foreachvalue (const TaskMap& tasks, framework->pending) {
+        foreachvalue (const TaskInfo& task, tasks) {
+          message.add_tasks()->CopyFrom(protobuf::createTask(
+              task, TASK_STAGING, framework->id));
+        }
+      }
+
       foreachvalue (Executor* executor, framework->executors) {
         // Add launched, terminated, and queued tasks.
         // Note that terminated executors will only have terminated
@@ -904,12 +918,12 @@ void Slave::doReliableRegistration(const Duration& duration)
         }
         foreach (const TaskInfo& task, executor->queuedTasks.values()) {
           message.add_tasks()->CopyFrom(protobuf::createTask(
-              task, TASK_STAGING, executor->id, framework->id));
+              task, TASK_STAGING, framework->id));
         }
 
         // Do not re-register with Command Executors because the
         // master doesn't store them; they are generated by the slave.
-        if (executor->commandExecutor) {
+        if (executor->isCommandExecutor()) {
           // NOTE: We have to unset the executor id here for the task
           // because the master uses the absence of task.executor_id()
           // to detect command executors.
@@ -988,7 +1002,7 @@ void Slave::doReliableRegistration(const Duration& duration)
 // TODO(vinod): Can we avoid this helper?
 Future<bool> Slave::unschedule(const string& path)
 {
-  return gc.unschedule(path);
+  return gc->unschedule(path);
 }
 
 
@@ -1076,7 +1090,7 @@ void Slave::runTask(
   // removed and the framework and top level executor directories
   // are not scheduled for deletion before '_runTask()' is called.
   CHECK_NOTNULL(framework);
-  framework->pending.put(executorId, task.task_id());
+  framework->pending[executorId][task.task_id()] = task;
 
   // If we are about to create a new executor, unschedule the top
   // level work and meta directories from getting gc'ed.
@@ -1128,7 +1142,10 @@ void Slave::_runTask(
   Framework* framework = getFramework(frameworkId);
   CHECK_NOTNULL(framework);
 
-  framework->pending.remove(executorId, task.task_id());
+  framework->pending[executorId].erase(task.task_id());
+  if (framework->pending[executorId].empty()) {
+    framework->pending.erase(executorId);
+  }
 
   // We don't send a status update here because a terminating
   // framework cannot send acknowledgements.
@@ -1739,7 +1756,8 @@ void Slave::registerExecutor(
     const ExecutorID& executorId)
 {
   LOG(INFO) << "Got registration for executor '" << executorId
-            << "' of framework " << frameworkId;
+            << "' of framework " << frameworkId << " from "
+            << stringify(from);
 
   CHECK(state == RECOVERING || state == DISCONNECTED ||
         state == RUNNING || state == TERMINATING)
@@ -2653,7 +2671,7 @@ void Slave::executorTerminated(
           if (!protobuf::isTerminalState(task->state())) {
             mesos::TaskState taskState;
             if ((termination.isReady() && termination.get().killed()) ||
-                 executor->commandExecutor) {
+                executor->isCommandExecutor()) {
               taskState = TASK_FAILED;
             } else {
               taskState = TASK_LOST;
@@ -2676,7 +2694,7 @@ void Slave::executorTerminated(
         foreach (const TaskInfo& task, executor->queuedTasks.values()) {
           mesos::TaskState taskState;
           if ((termination.isReady() && termination.get().killed()) ||
-               executor->commandExecutor) {
+              executor->isCommandExecutor()) {
             taskState = TASK_FAILED;
           } else {
             taskState = TASK_LOST;
@@ -2696,7 +2714,7 @@ void Slave::executorTerminated(
       // Only send ExitedExecutorMessage if it is not a Command
       // Executor because the master doesn't store them; they are
       // generated by the slave.
-      if (!executor->commandExecutor) {
+      if (!executor->isCommandExecutor()) {
         ExitedExecutorMessage message;
         message.mutable_slave_id()->MergeFrom(info.id());
         message.mutable_framework_id()->MergeFrom(frameworkId);
@@ -3062,7 +3080,7 @@ void Slave::_checkDiskUsage(const Future<double>& usage)
     // the next 'gc_delay - age'. Since a directory is always
     // scheduled for deletion 'gc_delay' into the future, only directories
     // that are at least 'age' old are deleted.
-    gc.prune(flags.gc_delay - age(usage.get()));
+    gc->prune(flags.gc_delay - age(usage.get()));
   }
   delay(flags.disk_watch_interval, self(), &Slave::checkDiskUsage);
 }
@@ -3320,7 +3338,7 @@ Future<Nothing> Slave::garbageCollect(const string& path)
   // GC based on the modification time.
   Duration delay = flags.gc_delay - (Clock::now() - time.get());
 
-  return gc.schedule(delay, path);
+  return gc->schedule(delay, path);
 }
 
 
@@ -3329,7 +3347,10 @@ double Slave::_tasks_staging()
 {
   double count = 0.0;
   foreachvalue (Framework* framework, frameworks) {
-    count += framework->pending.size();
+    typedef hashmap<TaskID, TaskInfo> TaskMap;
+    foreachvalue (const TaskMap& tasks, framework->pending) {
+      count += tasks.size();
+    }
 
     foreachvalue (Executor* executor, framework->executors) {
       count += executor->queuedTasks.size();
@@ -3499,7 +3520,7 @@ Slave::Metrics::Metrics(const Slave& slave)
 
 Slave::Metrics::~Metrics()
 {
-  // TODO(dhamon): Check return values of unregistered metrics
+  // TODO(dhamon): Check return values of unregistered metrics.
   process::metrics::remove(uptime_secs);
   process::metrics::remove(registered);
 
@@ -3622,14 +3643,14 @@ Executor* Framework::launchExecutor(
 
   // Launch the container.
   Future<bool> launch;
-  if (!executor->commandExecutor) {
+  if (!executor->isCommandExecutor()) {
     // If the executor is _not_ a command executor, this means that
     // the task will include the executor to run. The actual task to
     // run will be enqueued and subsequently handled by the executor
     // when it has registered to the slave.
     launch = slave->containerizer->launch(
         containerId,
-        executorInfo_, // modified to include the task's resources
+        executorInfo_, // modified to include the task's resources.
         executor->directory,
         slave->flags.switch_user ? Option<string>(user) : None(),
         slave->info.id(),
@@ -3849,14 +3870,19 @@ Executor::Executor(
     containerId(_containerId),
     directory(_directory),
     checkpoint(_checkpoint),
-    commandExecutor(strings::contains(
-        info.command().value(),
-        path::join(slave->flags.launcher_dir, "mesos-executor"))),
     pid(UPID()),
     resources(_info.resources()),
     completedTasks(MAX_COMPLETED_TASKS_PER_EXECUTOR)
 {
   CHECK_NOTNULL(slave);
+
+  Result<string> executorPath =
+    os::realpath(path::join(slave->flags.launcher_dir, "mesos-executor"));
+
+  if (executorPath.isSome()) {
+    commandExecutor =
+      strings::contains(info.command().value(), executorPath.get());
+  }
 
   if (checkpoint && slave->state != slave->RECOVERING) {
     // Checkpoint the executor info.
@@ -3895,8 +3921,7 @@ Task* Executor::addTask(const TaskInfo& task)
   CHECK(!launchedTasks.contains(task.task_id()))
     << "Duplicate task " << task.task_id();
 
-  Task* t = new Task(
-      protobuf::createTask(task, TASK_STAGING, id, frameworkId));
+  Task* t = new Task(protobuf::createTask(task, TASK_STAGING, frameworkId));
 
   launchedTasks[task.task_id()] = t;
 
@@ -3916,7 +3941,7 @@ void Executor::terminateTask(
   // Remove the task if it's queued.
   if (queuedTasks.contains(taskId)) {
     task = new Task(
-        protobuf::createTask(queuedTasks[taskId], state, id, frameworkId));
+        protobuf::createTask(queuedTasks[taskId], state, frameworkId));
     queuedTasks.erase(taskId);
   } else if (launchedTasks.contains(taskId)) {
     // Update the resources if it's been launched.
@@ -3965,7 +3990,7 @@ void Executor::checkpointTask(const TaskInfo& task)
   if (checkpoint) {
     CHECK_NOTNULL(slave);
 
-    const Task& t = protobuf::createTask(task, TASK_STAGING, id, frameworkId);
+    const Task& t = protobuf::createTask(task, TASK_STAGING, frameworkId);
     const string& path = paths::getTaskInfoPath(
         slave->metaDir,
         slave->info.id(),
@@ -4039,6 +4064,12 @@ bool Executor::incompleteTasks()
   return !queuedTasks.empty() ||
          !launchedTasks.empty() ||
          !terminatedTasks.empty();
+}
+
+
+bool Executor::isCommandExecutor()
+{
+  return commandExecutor;
 }
 
 

@@ -615,10 +615,10 @@ TEST_F(ReconciliationTest, PendingTask)
   EXPECT_NE(0u, offers.get().size());
 
   // Return a pending future from authorizer.
-  Future<Nothing> future;
+  Future<Nothing> authorize;
   Promise<bool> promise;
   EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
-    .WillOnce(DoAll(FutureSatisfy(&future),
+    .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
   TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
@@ -628,7 +628,7 @@ TEST_F(ReconciliationTest, PendingTask)
   driver.launchTasks(offers.get()[0].id(), tasks);
 
   // Wait until authorization is in progress.
-  AWAIT_READY(future);
+  AWAIT_READY(authorize);
 
   // First send an implicit reconciliation request for this task.
   Future<TaskStatus> update;
@@ -657,6 +657,84 @@ TEST_F(ReconciliationTest, PendingTask)
 
   AWAIT_READY(update2);
   EXPECT_EQ(TASK_STAGING, update2.get().state());
+  EXPECT_TRUE(update2.get().has_slave_id());
+
+  driver.stop();
+  driver.join();
+
+  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
+}
+
+
+// This test ensures that the master responds with the latest state
+// for tasks that are terminal at the master, but have not been
+// acknowledged by the framework. See MESOS-1389.
+TEST_F(ReconciliationTest, UnacknowledgedTerminalTask)
+{
+  Try<PID<Master> > master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+
+  TestContainerizer containerizer(&exec);
+
+  Try<PID<Slave> > slave = StartSlave(&containerizer);
+  ASSERT_SOME(slave);
+
+  // Launch a framework and get a task into a terminal state.
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(LaunchTasks(DEFAULT_EXECUTOR_INFO, 1, 1, 512, "*"))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  EXPECT_CALL(exec, registered(_, _, _, _));
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_FINISHED));
+
+  Future<TaskStatus> update1;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&update1));
+
+  // Prevent the slave from retrying the status update by
+  // only allowing a single update through to the master.
+  DROP_PROTOBUFS(StatusUpdateMessage(), _, master.get());
+  FUTURE_PROTOBUF(StatusUpdateMessage(), _, master.get());;
+
+  // Drop the status update acknowledgements to ensure that the
+  // task remains terminal and unacknowledged in the master.
+  DROP_PROTOBUFS(StatusUpdateAcknowledgementMessage(), _, _);
+
+  driver.start();
+
+  // Wait until the framework is registered.
+  AWAIT_READY(frameworkId);
+
+  AWAIT_READY(update1);
+  EXPECT_EQ(TASK_FINISHED, update1.get().state());
+  EXPECT_TRUE(update1.get().has_slave_id());
+
+  // Framework should receive a TASK_FINISHED update, since the
+  // master did not receive the acknowledgement.
+  Future<TaskStatus> update2;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&update2));
+
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  vector<TaskStatus> statuses;
+  driver.reconcileTasks(statuses);
+
+  AWAIT_READY(update2);
+  EXPECT_EQ(TASK_FINISHED, update2.get().state());
   EXPECT_TRUE(update2.get().has_slave_id());
 
   driver.stop();

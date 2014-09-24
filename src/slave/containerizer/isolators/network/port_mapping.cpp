@@ -815,6 +815,49 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
 
   LOG(INFO) << "Using " << lo.get() << " as the loopback interface";
 
+  // If egress rate limit is provided, do a sanity check that it is
+  // not greater than the host physical link speed.
+  Option<Bytes> egressRateLimitPerContainer;
+  if (flags.egress_rate_limit_per_container.isSome()) {
+    // Read host physical link speed from /sys/class/net/eth0/speed.
+    // This value is in MBits/s.
+    Try<string> value =
+      os::read(path::join("/sys/class/net", eth0.get(), "speed"));
+
+    if (value.isError()) {
+      return Error(
+          "Failed to read " +
+          path::join("/sys/class/net", eth0.get(), "speed") +
+          ": " + value.error());
+    }
+
+    Try<uint64_t> hostLinkSpeed = numify<uint64_t>(strings::trim(value.get()));
+    CHECK_SOME(hostLinkSpeed);
+
+    // It could be possible that the nic driver doesn't support
+    // reporting physical link speed. In that case, report error.
+    if (hostLinkSpeed.get() == 0xFFFFFFFF) {
+      return Error(
+          "Network Isolator failed to determine link speed for " + eth0.get());
+    }
+
+    // Convert host link speed to Bytes/s for comparason.
+    if (hostLinkSpeed.get() * 1000000 / 8 <
+        flags.egress_rate_limit_per_container.get().bytes()) {
+      return Error(
+          "The given egress traffic limit for containers " +
+          stringify(flags.egress_rate_limit_per_container.get().bytes()) +
+          " Bytes/s is greater than the host link speed " +
+          stringify(hostLinkSpeed.get() * 1000000 / 8) + " Bytes/s");
+    }
+
+    if (flags.egress_rate_limit_per_container.get() != Bytes(0)) {
+      egressRateLimitPerContainer = flags.egress_rate_limit_per_container.get();
+    } else {
+      LOG(WARNING) << "Ignoring the given zero egress rate limit";
+    }
+  }
+
   // Get the host IP, MAC and default gateway.
   Result<net::IP> hostIP = net::ip(eth0.get());
   if (!hostIP.isSome()) {
@@ -890,6 +933,7 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
   // feature only exists on kernel 3.6 or newer.
   const string loRouteLocalnet =
     path::join("/proc/sys/net/ipv4/conf", lo.get(), "route_localnet");
+
   if (!os::exists(loRouteLocalnet)) {
     // TODO(jieyu): Consider supporting running the isolator if this
     // feature is not available. We need to conditionally disable
@@ -1035,6 +1079,7 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
           hostIP.get(),
           hostEth0MTU.get(),
           hostDefaultGateway.get(),
+          egressRateLimitPerContainer,
           nonEphemeralPorts,
           ephemeralPortsAllocator)));
 }
@@ -1361,6 +1406,19 @@ Future<Nothing> PortMappingIsolatorProcess::isolate(
     return Failure(
         "Failed to create virtual ethernet pair: " +
         createVethPair.error());
+  }
+
+  // Disable IPv6 for veth as IPv6 packets won't be forwarded anyway.
+  const string disableIPv6 =
+    path::join("/proc/sys/net/ipv6/conf", veth(pid), "disable_ipv6");
+
+  if (os::exists(disableIPv6)) {
+    Try<Nothing> write = os::write(disableIPv6, "1");
+    if (write.isError()) {
+      return Failure(
+          "Failed to disable IPv6 for " + veth(pid) +
+          ": " + write.error());
+    }
   }
 
   // Sets the MAC address of veth to match the MAC address of the host
@@ -2194,7 +2252,7 @@ Try<Nothing> PortMappingIsolatorProcess::removeHostIPFilters(
   // removed is important. We need to remove filters on host eth0 and
   // host lo first before we remove filters on veth.
 
-  // Remove the IP packet filter from host eth0 to veth of the container
+  // Remove the IP packet filter from host eth0 to veth of the container.
   Try<bool> hostEth0ToVeth = filter::ip::remove(
       eth0,
       ingress::HANDLE,
@@ -2213,7 +2271,7 @@ Try<Nothing> PortMappingIsolatorProcess::removeHostIPFilters(
                << " to " << veth << " does not exist";
   }
 
-  // Remove the IP packet filter from host lo to veth of the container
+  // Remove the IP packet filter from host lo to veth of the container.
   Try<bool> hostLoToVeth = filter::ip::remove(
       lo,
       ingress::HANDLE,
@@ -2323,6 +2381,9 @@ string PortMappingIsolatorProcess::scripts(Info* info)
   // changes in the container will not be propagated to the host.
   script << "mount --make-rslave " << BIND_MOUNT_ROOT << "\n";
 
+  // Disable IPv6 as IPv6 packets won't be forwarded anyway.
+  script << "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6\n";
+
   // Configure lo and eth0.
   script << "ip link set " << lo << " address " << hostMAC
          << " mtu "<< hostEth0MTU << " up\n";
@@ -2405,6 +2466,24 @@ string PortMappingIsolatorProcess::scripts(Info* info)
   // Display the filters created on eth0 and lo.
   script << "tc filter show dev " << eth0 << " parent ffff:\n";
   script << "tc filter show dev " << lo << " parent ffff:\n";
+
+  // If throughput limit for container egress traffic exists, use HTB
+  // qdisc to achieve traffic shaping.
+  // TBF has some known issues with GSO packets.
+  // https://git.kernel.org/cgit/linux/kernel/git/davem/net.git/:
+  // e43ac79a4bc6ca90de4ba10983b4ca39cd215b4b
+  // Additionally, HTB has a simpler interface for just capping the
+  // throughput. TBF requires other parameters such as 'burst' that
+  // HTB already has default values for.
+  if (egressRateLimitPerContainer.isSome()) {
+    script << "tc qdisc add dev " << eth0 << " root handle 1: htb default 1\n";
+    script << "tc class add dev " << eth0 << " parent 1: classid 1:1 htb rate "
+           << egressRateLimitPerContainer.get().bytes() * 8 << "bit\n";
+
+    // Display the htb qdisc and class created on eth0.
+    script << "tc qdisc show dev " << eth0 << "\n";
+    script << "tc class show dev " << eth0 << "\n";
+  }
 
   return script.str();
 }

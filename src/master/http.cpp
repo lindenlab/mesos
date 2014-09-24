@@ -116,7 +116,7 @@ JSON::Object model(const Framework& framework)
   object.values["registered_time"] = framework.registeredTime.secs();
   object.values["unregistered_time"] = framework.unregisteredTime.secs();
   object.values["active"] = framework.active;
-  object.values["resources"] = model(framework.resources);
+  object.values["resources"] = model(framework.used());
   object.values["hostname"] = framework.info.hostname();
 
   // TODO(benh): Consider making reregisteredTime an Option.
@@ -405,7 +405,7 @@ Future<Response> Master::Http::stats(const Request& request)
         totalResources += resource;
       }
     }
-    foreach (const Resource& resource, slave->resourcesInUse) {
+    foreach (const Resource& resource, slave->used()) {
       if (resource.type() == Value::SCALAR) {
         usedResources += resource;
       }

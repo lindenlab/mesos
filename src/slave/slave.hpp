@@ -42,7 +42,6 @@
 #include <stout/linkedhashmap.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
-#include <stout/multihashmap.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
@@ -90,7 +89,8 @@ public:
   Slave(const Flags& flags,
         MasterDetector* detector,
         Containerizer* containerizer,
-        Files* files);
+        Files* files,
+        GarbageCollector* gc);
 
   virtual ~Slave();
 
@@ -439,7 +439,7 @@ private:
 
   process::Time startTime;
 
-  GarbageCollector gc;
+  GarbageCollector* gc;
   ResourceMonitor monitor;
 
   StatusUpdateManager* statusUpdateManager;
@@ -499,6 +499,9 @@ struct Executor
   // Returns true if there are any queued/launched/terminated tasks.
   bool incompleteTasks();
 
+  // Returns true if this is a command executor.
+  bool isCommandExecutor();
+
   enum State {
     REGISTERING,  // Executor is launched but not (re-)registered yet.
     RUNNING,      // Executor has (re-)registered.
@@ -521,8 +524,6 @@ struct Executor
   const std::string directory;
 
   const bool checkpoint;
-
-  const bool commandExecutor;
 
   process::UPID pid;
 
@@ -549,6 +550,8 @@ struct Executor
 private:
   Executor(const Executor&);              // No copying.
   Executor& operator = (const Executor&); // No assigning.
+
+  bool commandExecutor;
 };
 
 
@@ -586,7 +589,8 @@ struct Framework
 
   UPID pid;
 
-  multihashmap<ExecutorID, TaskID> pending; // Executors with pending tasks.
+  // Executors with pending tasks.
+  hashmap<ExecutorID, hashmap<TaskID, TaskInfo> > pending;
 
   // Current running executors.
   hashmap<ExecutorID, Executor*> executors;

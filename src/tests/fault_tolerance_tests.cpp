@@ -65,6 +65,7 @@ using process::Future;
 using process::Message;
 using process::Owned;
 using process::PID;
+using process::Promise;
 using process::UPID;
 using process::http::OK;
 using process::http::Response;
@@ -719,7 +720,7 @@ TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
   TaskInfo task =
     createTask(offers.get()[0], "sleep 10000", DEFAULT_EXECUTOR_ID);
   vector<TaskInfo> tasks;
-  tasks.push_back(task); // Long lasting task
+  tasks.push_back(task); // Long lasting task.
 
   EXPECT_CALL(executor, registered(_, _, _, _));
   EXPECT_CALL(executor, launchTask(_, _))
@@ -2144,6 +2145,102 @@ TEST_F(FaultToleranceTest, SlaveReregisterTerminatedExecutor)
 }
 
 
+// This test ensures that a master properly handles the
+// re-registration of a framework when an empty executor is present
+// on a slave. This was added to prevent regressions on MESOS-1821.
+TEST_F(FaultToleranceTest, FrameworkReregisterEmptyExecutor)
+{
+  Try<PID<Master> > master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+
+  StandaloneMasterDetector slaveDetector(master.get());
+  StandaloneMasterDetector schedulerDetector(master.get());
+
+  Try<PID<Slave> > slave = StartSlave(&containerizer, &slaveDetector);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  TestingMesosSchedulerDriver driver(&sched, &schedulerDetector);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(LaunchTasks(DEFAULT_EXECUTOR_INFO, 1, 1, 512, "*"))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  ExecutorDriver* execDriver;
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .WillOnce(SaveArg<0>(&execDriver));
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_FINISHED));
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  Future<Nothing> _statusUpdateAcknowledgement =
+    FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
+
+  driver.start();
+
+  AWAIT_READY(status);
+  EXPECT_EQ(TASK_FINISHED, status.get().state());
+
+  // Make sure the acknowledgement is processed the slave.
+  AWAIT_READY(_statusUpdateAcknowledgement);
+
+  EXPECT_CALL(sched, disconnected(&driver))
+    .WillOnce(Return());
+
+  // Now we bring up a new master, the executor from the slave
+  // re-registration will be empty (no tasks).
+  this->Stop(master.get());
+
+  master = StartMaster();
+
+  Future<SlaveReregisteredMessage> slaveReregisteredMessage =
+    FUTURE_PROTOBUF(SlaveReregisteredMessage(), master.get(), slave.get());
+
+  // Re-register the slave.
+  slaveDetector.appoint(master.get());
+
+  AWAIT_READY(slaveReregisteredMessage);
+
+  Future<Nothing> registered;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureSatisfy(&registered));
+
+  // Re-register the framework.
+  schedulerDetector.appoint(master.get());
+
+  AWAIT_READY(registered);
+
+  Future<ExitedExecutorMessage> executorExitedMessage =
+    FUTURE_PROTOBUF(ExitedExecutorMessage(), slave.get(), master.get());
+
+  // Now kill the executor.
+  containerizer.destroy(frameworkId.get(), DEFAULT_EXECUTOR_ID);
+
+  // Ensure the master correctly handles the exited executor
+  // with no tasks!
+  AWAIT_READY(executorExitedMessage);
+  Clock::pause();
+  Clock::settle();
+  Clock::resume();
+
+  driver.stop();
+  driver.join();
+
+  Shutdown();
+}
+
+
 // This test verifies that the master sends TASK_LOST updates
 // for tasks in the master absent from the re-registered slave.
 // We do this by dropping RunTaskMessage from master to the slave.
@@ -2210,6 +2307,77 @@ TEST_F(FaultToleranceTest, ReconcileLostTasks)
 
   ASSERT_EQ(task.task_id(), status.get().task_id());
   ASSERT_EQ(TASK_LOST, status.get().state());
+
+  driver.stop();
+  driver.join();
+
+  Shutdown();
+}
+
+
+// This test verifies that the slave reports pending tasks when
+// re-registering, otherwise the master will report them as being
+// lost.
+TEST_F(FaultToleranceTest, ReconcilePendingTasks)
+{
+  Try<PID<Master> > master = StartMaster();
+  ASSERT_SOME(master);
+
+  StandaloneMasterDetector detector(master.get());
+
+  Try<PID<Slave> > slave = StartSlave(&detector);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer> > offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  // No TASK_LOST updates should occur!
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .Times(0);
+
+  // We drop the _runTask dispatch to ensure the task remains
+  // pending in the slave.
+  Future<Nothing> _runTask = DROP_DISPATCH(slave.get(), &Slave::_runTask);
+
+  TaskInfo task1;
+  task1.set_name("test task");
+  task1.mutable_task_id()->set_value("1");
+  task1.mutable_slave_id()->MergeFrom(offers.get()[0].slave_id());
+  task1.mutable_resources()->MergeFrom(offers.get()[0].resources());
+  task1.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
+
+  vector<TaskInfo> tasks1;
+  tasks1.push_back(task1);
+
+  driver.launchTasks(offers.get()[0].id(), tasks1);
+
+  AWAIT_READY(_runTask);
+
+  Future<SlaveReregisteredMessage> slaveReregisteredMessage =
+    FUTURE_PROTOBUF(SlaveReregisteredMessage(), _, _);
+
+  // Simulate a spurious master change event (e.g., due to ZooKeeper
+  // expiration) at the slave to force re-registration.
+  detector.appoint(master.get());
+
+  AWAIT_READY(slaveReregisteredMessage);
+
+  Clock::pause();
+  Clock::settle();
+  Clock::resume();
 
   driver.stop();
   driver.join();
