@@ -11,6 +11,9 @@
 
 
 export JAVA_HOME:=$(shell update-alternatives --query javac | grep ^Value | sed -e 's/^Value: //' -e 's_/bin/javac__')
+export LD_LIBRARY_PATH:=$(shell pwd)/deps/usr/lib/$(shell dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null):$(LD_LIBRARY_PATH)
+export PATH:=$(shell pwd)/deps/usr/bin:$(PATH)
+export PYTHONPATH:=$(shell pwd)/deps/usr/lib/python2.7/dist-packages:$(PYTHONPATH)
 CC:=
 CXX:=
 
@@ -28,10 +31,17 @@ endif
 configure: configure-stamp
 configure-stamp:
 	dh_testdir
+	# Grab latest protobuf
+	test -d deps/usr/include/google/protobuf || ( apt-get download libprotobuf-dev && dpkg-deb --extract libprotobuf-dev_*deb deps )
+	test -d deps/usr/share/java || ( apt-get download libprotobuf-java && dpkg-deb --extract libprotobuf-java_*deb deps )
+	test -d deps/usr/share/doc/libprotobuf9 || ( apt-get download libprotobuf9 && dpkg-deb --extract libprotobuf9_*deb deps )
+	test -d deps/usr/share/doc/libprotoc9 || ( apt-get download libprotoc9 && dpkg-deb --extract libprotoc9_*deb deps )
+	test -x deps/usr/bin/protoc || ( apt-get download protobuf-compiler && dpkg-deb --extract protobuf-compiler_*deb deps )
+	test -d deps/usr/lib/python2.7/dist-packages/google/protobuf || ( apt-get download python-protobuf && dpkg-deb --extract python-protobuf_*deb deps && touch deps/usr/lib/python2.7/dist-packages/google/__init__.py )
 	# Add here commands to configure the package.
-	./bootstrap
+	test -f configure || ./bootstrap
 	mkdir -p build
-	cd build; ../configure --prefix=/usr
+	cd build; ../configure --prefix=/usr --with-protobuf="$(CURDIR)/deps/usr"
 
 	touch configure-stamp
 
@@ -49,8 +59,8 @@ build-stamp: configure-stamp
 clean:
 	dh_testdir
 	dh_testroot
-	rm -f build-stamp configure-stamp
-	rm -rf build
+	rm -f build-stamp configure-stamp configure
+	rm -rf build deps *.deb autom4te.cache
 
 	# Add here commands to clean up after the build process.
 	-cd build; $(MAKE) clean

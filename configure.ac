@@ -277,7 +277,7 @@ fi
 # extending it by /lib.
 if test -n "`echo $with_protobuf`"; then
   CPPFLAGS="$CPPFLAGS -I${with_protobuf}/include"
-  LDFLAGS="$LDFLAGS -L${with_protobuf}/lib"
+  LDFLAGS="$LDFLAGS -L${with_protobuf}/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null)"
 fi
 
 
