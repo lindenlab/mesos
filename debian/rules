@@ -38,6 +38,8 @@ configure-stamp:
 	test -d deps/usr/share/doc/libprotoc9 || ( apt-get download libprotoc9 && dpkg-deb --extract libprotoc9_*deb deps )
 	test -x deps/usr/bin/protoc || ( apt-get download protobuf-compiler && dpkg-deb --extract protobuf-compiler_*deb deps )
 	test -d deps/usr/lib/python2.7/dist-packages/google/protobuf || ( apt-get download python-protobuf && dpkg-deb --extract python-protobuf_*deb deps && touch deps/usr/lib/python2.7/dist-packages/google/__init__.py )
+	# Patch to avoid warning
+	sed -i 's/int i = 0; i < new_entries/uint32 i = 0; i < new_entries/' deps/usr/include/google/protobuf/wire_format_lite_inl.h
 	# Add here commands to configure the package.
 	test -f configure || ./bootstrap
 	mkdir -p build
