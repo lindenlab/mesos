@@ -20,10 +20,10 @@ DISTRIBUTE_EGG+=distribute-0.6.26@PYTHON_EGG_PUREPY_POSTFIX@.egg
 test ! -e ${DISTRIBUTE_EGG} && \
   echo "${RED}Failed to find ${DISTRIBUTE_EGG} verify PYTHONPATH${NORMAL}"
 
-PROTOBUF=${MESOS_BUILD_DIR}/3rdparty/libprocess/3rdparty/protobuf-2.5.0
+PROTOBUF=${MESOS_BUILD_DIR}/3rdparty/libprocess/3rdparty/protobuf-2.6.0
 
 PROTOBUF_EGG=${PROTOBUF}/python/dist/
-PROTOBUF_EGG+=protobuf-2.5.0@PYTHON_EGG_PUREPY_POSTFIX@.egg
+PROTOBUF_EGG+=protobuf-2.6.0@PYTHON_EGG_PUREPY_POSTFIX@.egg
 
 test ! -e ${PROTOBUF_EGG} && \
   echo "${RED}Failed to find ${PROTOBUF_EGG} check your PYTHONPATH${NORMAL}"
