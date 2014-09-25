@@ -571,6 +571,8 @@ libmesos_la_LIBTOOLFLAGS = --tag=CXX
 # Add the convenience library.
 libmesos_la_LIBADD = libmesos_no_3rdparty.la
 
+MESOS_LIBS = libmesos.la
+
 # For non-convenience libraries we need to link them in to make the shared
 # library each time. (Currently, we don't support platforms where this is not
 # possible.)
@@ -578,6 +580,7 @@ if WITH_BUNDLED_GLOG
   libmesos_la_LIBADD += ../$(GLOG)/libglog.la
 else
   libmesos_la_LIBADD += -lglog
+  MESOS_LIBS += -lglog
 endif
 
 if WITH_BUNDLED_LEVELDB
@@ -588,18 +591,21 @@ if WITH_BUNDLED_LEVELDB
   libmesos_la_LIBADD += ../$(LEVELDB)/libleveldb.a
 else
   libmesos_la_LIBADD += -lleveldb
+  MESOS_LIBS += -lleveldb
 endif
 
 if WITH_BUNDLED_ZOOKEEPER
   libmesos_la_LIBADD += ../$(ZOOKEEPER)/libzookeeper_mt.la
 else
   libmesos_la_LIBADD += -lzookeeper_mt
+  MESOS_LIBS += -lzookeeper_mt
 endif
 
 if WITH_BUNDLED_PROTOBUF
   libmesos_la_LIBADD += ../$(PROTOBUF)/src/libprotobuf.la
 else
   libmesos_la_LIBADD += -lprotobuf
+  MESOS_LIBS += -lprotobuf
 endif
 
 libmesos_la_LIBADD += ../$(LIBPROCESS)/libprocess.la
@@ -608,69 +614,69 @@ libmesos_la_LIBADD += ../$(LIBPROCESS)/libprocess.la
 sbin_PROGRAMS += mesos-master
 mesos_master_SOURCES = master/main.cpp
 mesos_master_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_master_LDADD = libmesos.la
+mesos_master_LDADD = $(MESOS_LIBS)
 
 sbin_PROGRAMS += mesos-slave
 mesos_slave_SOURCES = slave/main.cpp
 mesos_slave_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_slave_LDADD = libmesos.la
+mesos_slave_LDADD = $(MESOS_LIBS)
 
 bin_PROGRAMS += mesos-local
 mesos_local_SOURCES = local/main.cpp
 mesos_local_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_local_LDADD = libmesos.la
+mesos_local_LDADD = $(MESOS_LIBS)
 
 pkglibexec_PROGRAMS += mesos-fetcher
 mesos_fetcher_SOURCES = launcher/fetcher.cpp
 mesos_fetcher_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_fetcher_LDADD = libmesos.la
+mesos_fetcher_LDADD = $(MESOS_LIBS)
 
 pkglibexec_PROGRAMS += mesos-executor
 mesos_executor_SOURCES = launcher/executor.cpp
 mesos_executor_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_executor_LDADD = libmesos.la
+mesos_executor_LDADD = $(MESOS_LIBS)
 
 pkglibexec_PROGRAMS += mesos-containerizer
 mesos_containerizer_SOURCES = slave/containerizer/mesos/main.cpp
 mesos_containerizer_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_containerizer_LDADD = libmesos.la
+mesos_containerizer_LDADD = $(MESOS_LIBS)
 
 if WITH_NETWORK_ISOLATOR
 pkglibexec_PROGRAMS += mesos-network-helper
 mesos_network_helper_SOURCES = slave/containerizer/isolators/network/helper.cpp
 mesos_network_helper_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_network_helper_LDADD = libmesos.la
+mesos_network_helper_LDADD = $(MESOS_LIBS)
 endif
 
 pkglibexec_PROGRAMS += mesos-health-check
 mesos_health_check_SOURCES = health-check/main.cpp
 mesos_health_check_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_health_check_LDADD = libmesos.la
+mesos_health_check_LDADD = $(MESOS_LIBS)
 
 pkglibexec_PROGRAMS += mesos-usage
 mesos_usage_SOURCES = usage/main.cpp
 mesos_usage_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_usage_LDADD = libmesos.la
+mesos_usage_LDADD = $(MESOS_LIBS)
 
 bin_PROGRAMS += mesos-log
 mesos_log_SOURCES = log/main.cpp
 mesos_log_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_log_LDADD = libmesos.la
+mesos_log_LDADD = $(MESOS_LIBS)
 
 bin_PROGRAMS += mesos
 mesos_SOURCES = cli/mesos.cpp
 mesos_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_LDADD = libmesos.la
+mesos_LDADD = $(MESOS_LIBS)
 
 bin_PROGRAMS += mesos-execute
 mesos_execute_SOURCES = cli/execute.cpp
 mesos_execute_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_execute_LDADD = libmesos.la
+mesos_execute_LDADD = $(MESOS_LIBS)
 
 bin_PROGRAMS += mesos-resolve
 mesos_resolve_SOURCES = cli/resolve.cpp
 mesos_resolve_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_resolve_LDADD = libmesos.la
+mesos_resolve_LDADD = $(MESOS_LIBS)
 
 # Need to distribute and install mesos-*.
 dist_bin_SCRIPTS +=							\
@@ -1021,57 +1027,57 @@ PHONY_TARGETS += clean-python
 check_PROGRAMS += low-level-scheduler-libprocess
 low_level_scheduler_libprocess_SOURCES = examples/low_level_scheduler_libprocess.cpp
 low_level_scheduler_libprocess_CPPFLAGS = $(MESOS_CPPFLAGS)
-low_level_scheduler_libprocess_LDADD = libmesos.la
+low_level_scheduler_libprocess_LDADD = $(MESOS_LIBS)
 
 check_PROGRAMS += low-level-scheduler-pthread
 low_level_scheduler_pthread_SOURCES = examples/low_level_scheduler_pthread.cpp
 low_level_scheduler_pthread_CPPFLAGS = $(MESOS_CPPFLAGS)
-low_level_scheduler_pthread_LDADD = libmesos.la
+low_level_scheduler_pthread_LDADD = $(MESOS_LIBS)
 
 check_PROGRAMS += test-framework
 test_framework_SOURCES = examples/test_framework.cpp
 test_framework_CPPFLAGS = $(MESOS_CPPFLAGS)
-test_framework_LDADD = libmesos.la
+test_framework_LDADD = $(MESOS_LIBS)
 
 check_PROGRAMS += test-executor
 test_executor_SOURCES = examples/test_executor.cpp
 test_executor_CPPFLAGS = $(MESOS_CPPFLAGS)
-test_executor_LDADD = libmesos.la
+test_executor_LDADD = $(MESOS_LIBS)
 
 check_PROGRAMS += long-lived-framework
 long_lived_framework_SOURCES = examples/long_lived_framework.cpp
 long_lived_framework_CPPFLAGS = $(MESOS_CPPFLAGS)
-long_lived_framework_LDADD = libmesos.la
+long_lived_framework_LDADD = $(MESOS_LIBS)
 
 check_PROGRAMS += long-lived-executor
 long_lived_executor_SOURCES = examples/long_lived_executor.cpp
 long_lived_executor_CPPFLAGS = $(MESOS_CPPFLAGS)
-long_lived_executor_LDADD = libmesos.la
+long_lived_executor_LDADD = $(MESOS_LIBS)
 
 check_PROGRAMS += no-executor-framework
 no_executor_framework_SOURCES = examples/no_executor_framework.cpp
 no_executor_framework_CPPFLAGS = $(MESOS_CPPFLAGS)
-no_executor_framework_LDADD = libmesos.la
+no_executor_framework_LDADD = $(MESOS_LIBS)
 
 check_PROGRAMS += docker-no-executor-framework
 docker_no_executor_framework_SOURCES = examples/docker_no_executor_framework.cpp
 docker_no_executor_framework_CPPFLAGS = $(MESOS_CPPFLAGS)
-docker_no_executor_framework_LDADD = libmesos.la
+docker_no_executor_framework_LDADD = $(MESOS_LIBS)
 
 check_PROGRAMS += balloon-framework
 balloon_framework_SOURCES = examples/balloon_framework.cpp
 balloon_framework_CPPFLAGS = $(MESOS_CPPFLAGS)
-balloon_framework_LDADD = libmesos.la
+balloon_framework_LDADD = $(MESOS_LIBS)
 
 check_PROGRAMS += balloon-executor
 balloon_executor_SOURCES = examples/balloon_executor.cpp
 balloon_executor_CPPFLAGS = $(MESOS_CPPFLAGS)
-balloon_executor_LDADD = libmesos.la
+balloon_executor_LDADD = $(MESOS_LIBS)
 
 check_PROGRAMS += load-generator-framework
 load_generator_framework_SOURCES = examples/load_generator_framework.cpp
 load_generator_framework_CPPFLAGS = $(MESOS_CPPFLAGS)
-load_generator_framework_LDADD = libmesos.la
+load_generator_framework_LDADD = $(MESOS_LIBS)
 
 check_PROGRAMS += mesos-tests
 
@@ -1132,7 +1138,7 @@ mesos_tests_CPPFLAGS += -DBUILD_DIR=\"$(abs_top_builddir)\"
 mesos_tests_CPPFLAGS += -I../$(GTEST)/include
 mesos_tests_CPPFLAGS += -I../$(GMOCK)/include
 
-mesos_tests_LDADD = ../$(LIBPROCESS)/3rdparty/libgmock.la libmesos.la
+mesos_tests_LDADD = ../$(LIBPROCESS)/3rdparty/libgmock.la $(MESOS_LIBS)
 
 mesos_tests_DEPENDENCIES = # Initialized to allow += below.
 

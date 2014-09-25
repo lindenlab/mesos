@@ -8,7 +8,7 @@ Standards-Version: 3.7.2
 
 Package: mesos
 Architecture: amd64
-Depends: java7-runtime-headless | java6-runtime-headless, libcurl3, libcurl3-nss
+Depends: java7-runtime-headless | java6-runtime-headless, libcurl3, libcurl3-nss, libprotobuf9
 Recommends: zookeeper, zookeeperd, zookeeper-bin
 Description: Cluster resouce manager with efficient resource isolation
  Apache Mesos is a cluster manager that offers efficient resource isolation
